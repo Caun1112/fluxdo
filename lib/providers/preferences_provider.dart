@@ -97,6 +97,21 @@ class AppPreferences {
   /// 分享图片主题索引
   final int shareImageThemeIndex;
 
+  /// 分享图片是否显示站点标识
+  final bool shareImageShowLogo;
+
+  /// 分享图片是否显示标题
+  final bool shareImageShowTitle;
+
+  /// 分享图片是否显示作者信息
+  final bool shareImageShowAuthor;
+
+  /// 分享图片是否显示正文内容
+  final bool shareImageShowContent;
+
+  /// 分享图片是否显示分享链接
+  final bool shareImageShowLink;
+
   /// 自动填充登录凭证
   final bool autoFillLogin;
 
@@ -213,6 +228,11 @@ class AppPreferences {
     required this.openExternalLinksInAppBrowser,
     required this.contentFontScale,
     required this.shareImageThemeIndex,
+    this.shareImageShowLogo = true,
+    this.shareImageShowTitle = true,
+    this.shareImageShowAuthor = true,
+    this.shareImageShowContent = true,
+    this.shareImageShowLink = true,
     required this.autoFillLogin,
     required this.clipboardTopicLinkDetection,
     required this.topicFilterKeywords,
@@ -256,6 +276,11 @@ class AppPreferences {
     bool? openExternalLinksInAppBrowser,
     double? contentFontScale,
     int? shareImageThemeIndex,
+    bool? shareImageShowLogo,
+    bool? shareImageShowTitle,
+    bool? shareImageShowAuthor,
+    bool? shareImageShowContent,
+    bool? shareImageShowLink,
     bool? autoFillLogin,
     bool? clipboardTopicLinkDetection,
     List<String>? topicFilterKeywords,
@@ -299,6 +324,12 @@ class AppPreferences {
           openExternalLinksInAppBrowser ?? this.openExternalLinksInAppBrowser,
       contentFontScale: contentFontScale ?? this.contentFontScale,
       shareImageThemeIndex: shareImageThemeIndex ?? this.shareImageThemeIndex,
+      shareImageShowLogo: shareImageShowLogo ?? this.shareImageShowLogo,
+      shareImageShowTitle: shareImageShowTitle ?? this.shareImageShowTitle,
+      shareImageShowAuthor: shareImageShowAuthor ?? this.shareImageShowAuthor,
+      shareImageShowContent:
+          shareImageShowContent ?? this.shareImageShowContent,
+      shareImageShowLink: shareImageShowLink ?? this.shareImageShowLink,
       autoFillLogin: autoFillLogin ?? this.autoFillLogin,
       clipboardTopicLinkDetection:
           clipboardTopicLinkDetection ?? this.clipboardTopicLinkDetection,
@@ -343,7 +374,8 @@ class AppPreferences {
       progressGestureSwipeUp:
           progressGestureSwipeUp ?? this.progressGestureSwipeUp,
       progressGestureLongPressEnabled:
-          progressGestureLongPressEnabled ?? this.progressGestureLongPressEnabled,
+          progressGestureLongPressEnabled ??
+          this.progressGestureLongPressEnabled,
       progressGestureMenuActions:
           progressGestureMenuActions ?? this.progressGestureMenuActions,
     );
@@ -359,6 +391,12 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
       'pref_open_external_links_in_app_browser';
   static const String _contentFontScaleKey = 'pref_content_font_scale';
   static const String _shareImageThemeIndexKey = 'pref_share_image_theme_index';
+  static const String _shareImageShowLogoKey = 'pref_share_image_show_logo';
+  static const String _shareImageShowTitleKey = 'pref_share_image_show_title';
+  static const String _shareImageShowAuthorKey = 'pref_share_image_show_author';
+  static const String _shareImageShowContentKey =
+      'pref_share_image_show_content';
+  static const String _shareImageShowLinkKey = 'pref_share_image_show_link';
   static const String _autoFillLoginKey = 'pref_auto_fill_login';
   static const String _clipboardTopicLinkDetectionKey =
       'pref_clipboard_topic_link_detection';
@@ -375,7 +413,8 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   static const String _aiSwipeEntryKey = 'pref_ai_swipe_entry';
   static const String _aiPostReviewEnabledKey = 'pref_ai_post_review_enabled';
   static const String _aiPostReviewModelPrefKey = 'pref_ai_post_review_model';
-  static const String _hcaptchaCreateEndpointKey = 'pref_hcaptcha_create_endpoint';
+  static const String _hcaptchaCreateEndpointKey =
+      'pref_hcaptcha_create_endpoint';
   static const String _dialogBlurKey = 'pref_dialog_blur';
   static const String _showSignaturesKey = 'pref_show_signatures';
   static const String _defaultNestedViewKey = 'pref_default_nested_view';
@@ -419,6 +458,13 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
               _prefs.getBool(_openExternalLinksInAppBrowserKey) ?? false,
           contentFontScale: _prefs.getDouble(_contentFontScaleKey) ?? 1.0,
           shareImageThemeIndex: _prefs.getInt(_shareImageThemeIndexKey) ?? 0,
+          shareImageShowLogo: _prefs.getBool(_shareImageShowLogoKey) ?? true,
+          shareImageShowTitle: _prefs.getBool(_shareImageShowTitleKey) ?? true,
+          shareImageShowAuthor:
+              _prefs.getBool(_shareImageShowAuthorKey) ?? true,
+          shareImageShowContent:
+              _prefs.getBool(_shareImageShowContentKey) ?? true,
+          shareImageShowLink: _prefs.getBool(_shareImageShowLinkKey) ?? true,
           autoFillLogin: _prefs.getBool(_autoFillLoginKey) ?? true,
           clipboardTopicLinkDetection:
               _prefs.getBool(_clipboardTopicLinkDetectionKey) ?? false,
@@ -525,6 +571,29 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   Future<void> setShareImageThemeIndex(int index) async {
     state = state.copyWith(shareImageThemeIndex: index);
     await _prefs.setInt(_shareImageThemeIndexKey, index);
+  }
+
+  Future<void> setShareImageDisplayOptions({
+    required bool showLogo,
+    required bool showTitle,
+    required bool showAuthor,
+    required bool showContent,
+    required bool showLink,
+  }) async {
+    state = state.copyWith(
+      shareImageShowLogo: showLogo,
+      shareImageShowTitle: showTitle,
+      shareImageShowAuthor: showAuthor,
+      shareImageShowContent: showContent,
+      shareImageShowLink: showLink,
+    );
+    await Future.wait([
+      _prefs.setBool(_shareImageShowLogoKey, showLogo),
+      _prefs.setBool(_shareImageShowTitleKey, showTitle),
+      _prefs.setBool(_shareImageShowAuthorKey, showAuthor),
+      _prefs.setBool(_shareImageShowContentKey, showContent),
+      _prefs.setBool(_shareImageShowLinkKey, showLink),
+    ]);
   }
 
   Future<void> setAutoFillLogin(bool enabled) async {
