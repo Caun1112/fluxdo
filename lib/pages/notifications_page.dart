@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/discourse_providers.dart';
+import '../utils/load_more_coordinator.dart';
 import '../widgets/desktop_refresh_indicator.dart';
 import '../utils/notification_navigation.dart';
 import '../widgets/notification/notification_item.dart';
 import '../widgets/notification/notification_list_skeleton.dart';
 import '../widgets/common/error_view.dart';
+import '../widgets/common/paged_list_footer.dart';
 import '../l10n/s.dart';
 
 /// 通知历史列表页面（独立分页，不受 messageBus 干扰）
@@ -18,6 +21,7 @@ class NotificationsPage extends ConsumerStatefulWidget {
 
 class _NotificationsPageState extends ConsumerState<NotificationsPage> {
   final ScrollController _scrollController = ScrollController();
+  final LoadMoreCoordinator _loadMoreCoordinator = LoadMoreCoordinator();
 
   @override
   void initState() {
@@ -32,20 +36,36 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
   }
 
   void _onScroll() {
-    if (_scrollController.position.pixels >=
-        _scrollController.position.maxScrollExtent - 200) {
-      ref.read(notificationListProvider.notifier).loadMore();
+    final distance =
+        _scrollController.position.maxScrollExtent -
+        _scrollController.position.pixels;
+    if (_loadMoreCoordinator.shouldTriggerForDistance(distance)) {
+      _loadMore();
     }
   }
 
+  Future<void> _loadMore() async {
+    final notifier = ref.read(notificationListProvider.notifier);
+    await _loadMoreCoordinator.loadMore(
+      loadMore: notifier.loadMore,
+      hasMore: () => notifier.hasMore,
+      isActive: () => mounted,
+      progressCount: () =>
+          ref.read(notificationListProvider).value?.length ?? 0,
+    );
+  }
+
   Future<void> _onRefresh() async {
+    _loadMoreCoordinator.resetCooldown();
     await ref.read(notificationListProvider.notifier).refresh();
   }
 
   @override
   Widget build(BuildContext context) {
     final notificationsAsync = ref.watch(notificationListProvider);
-    final systemAvatarTemplate = ref.watch(systemUserAvatarTemplateProvider).value;
+    final systemAvatarTemplate = ref
+        .watch(systemUserAvatarTemplateProvider)
+        .value;
 
     return Scaffold(
       appBar: AppBar(
@@ -53,7 +73,7 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
         centerTitle: true,
         actions: [
           IconButton(
-            icon: const Icon(Icons.done_all),
+            icon: const Icon(Symbols.done_all_rounded),
             onPressed: () async {
               await ref.read(notificationListProvider.notifier).markAllAsRead();
               // 快捷面板下次打开时会自动 silentRefresh 同步已读状态
@@ -71,9 +91,16 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Icon(Icons.notifications_none, size: 64, color: Colors.grey),
+                    const Icon(
+                      Symbols.notifications_rounded,
+                      size: 64,
+                      color: Colors.grey,
+                    ),
                     const SizedBox(height: 16),
-                    Text(context.l10n.notification_empty, style: const TextStyle(color: Colors.grey)),
+                    Text(
+                      context.l10n.notification_empty,
+                      style: const TextStyle(color: Colors.grey),
+                    ),
                   ],
                 ),
               );
@@ -85,58 +112,26 @@ class _NotificationsPageState extends ConsumerState<NotificationsPage> {
               itemBuilder: (context, index) {
                 if (index == notifications.length) {
                   final notifier = ref.read(notificationListProvider.notifier);
-                  if (notifier.isLoadMoreFailed) {
-                    return Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Center(
-                        child: GestureDetector(
-                          onTap: () => notifier.retryLoadMore(),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.refresh, size: 16, color: Theme.of(context).colorScheme.primary),
-                              const SizedBox(width: 6),
-                              Text(
-                                context.l10n.common_loadFailedTapRetry,
-                                style: TextStyle(fontSize: 14, color: Theme.of(context).colorScheme.primary),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    );
-                  }
-                  if (!notifier.hasMore) {
-                    return Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Center(
-                        child: Text(context.l10n.common_noMore, style: const TextStyle(color: Colors.grey)),
-                      ),
-                    );
-                  }
-                  if (notificationsAsync.isLoading && !notificationsAsync.hasError) {
-                    return const Padding(
-                      padding: EdgeInsets.all(16.0),
-                      child: Center(child: CircularProgressIndicator()),
-                    );
-                  }
-                  return const SizedBox();
+                  return PagedListFooter(
+                    hasMore: notifier.hasMore,
+                    isLoadingMore: notifier.isLoadingMore,
+                    isLoadMoreFailed: notifier.isLoadMoreFailed,
+                    onRetry: notifier.retryLoadMore,
+                  );
                 }
                 final notification = notifications[index];
                 return NotificationItem(
                   notification: notification,
                   systemAvatarTemplate: systemAvatarTemplate,
-                  onTap: () => handleNotificationTap(context, ref, notification),
+                  onTap: () =>
+                      handleNotificationTap(context, ref, notification),
                 );
               },
             );
           },
           loading: () => const NotificationListSkeleton(),
-          error: (error, stack) => ErrorView(
-            error: error,
-            stackTrace: stack,
-            onRetry: _onRefresh,
-          ),
+          error: (error, stack) =>
+              ErrorView(error: error, stackTrace: stack, onRetry: _onRefresh),
         ),
       ),
     );

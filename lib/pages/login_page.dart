@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../l10n/s.dart';
+import '../services/auth_session.dart';
 import '../services/cf_challenge_service.dart';
 import '../services/credential_store_service.dart';
 import '../services/discourse/discourse_service.dart';
@@ -117,17 +119,19 @@ class _LoginPageState extends State<LoginPage>
     if (clearance != null && clearance.isNotEmpty) return true;
     if (!mounted) return false;
 
+    final requestGeneration = AuthSession().generation;
     final ok = await CfChallengeService().showManualVerify(context, true);
     if (ok != true) return false;
 
-    // 等 1.5s 让 WV 网络栈把 Set-Cookie 写完, 然后**同步全部** webview cookies
-    // 到 jar (cookieNames=null = 不限定), 不只 cf_clearance —— hcaptcha / CF
-    // bot management 会写 `_cfuvid` 之类的 session-scoped cookie, 缺它后续
-    // POST 一样被 CF 拒。CfChallengeInterceptor 的 `{'cf_clearance'}` 限定对
-    // 普通业务够, 但 login endpoint 要求完整 cookie set。
+    // 等 1.5s 让 WV 网络栈把 Set-Cookie 写完, 然后同步 CF/验证码相关 cookie。
+    // 这里明确排除 Discourse session cookie，登录成功收口流程会单独同步它们。
     await Future<void>.delayed(const Duration(milliseconds: 1500));
     for (var i = 0; i < 3; i++) {
-      await BoundarySyncService.instance.syncFromWebView(cookieNames: null);
+      await BoundarySyncService.instance.syncFromWebView(
+        cookieNames: null,
+        excludeCookieNames: CookieJarService.authCookieNames,
+        requestGeneration: requestGeneration,
+      );
       clearance = await jar.getCfClearance();
       if (clearance != null && clearance.isNotEmpty) return true;
       await Future<void>.delayed(const Duration(milliseconds: 500));
@@ -265,15 +269,9 @@ class _LoginPageState extends State<LoginPage>
                   left: 4,
                   child: _entry(
                     0,
-                    IconButton(
-                      icon: const Icon(Icons.arrow_back_rounded),
+                    AmbientIconButton(
+                      icon: Symbols.arrow_back_rounded,
                       tooltip: '返回',
-                      style: IconButton.styleFrom(
-                        backgroundColor: scheme.surface.withValues(alpha: 0.3),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
                       onPressed: () => Navigator.of(context).maybePop(),
                     ),
                   ),
@@ -285,17 +283,9 @@ class _LoginPageState extends State<LoginPage>
                     right: 4,
                     child: _entry(
                       0,
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline_rounded),
+                      AmbientIconButton(
+                        icon: Symbols.delete_rounded,
                         tooltip: '清除保存的账号',
-                        style: IconButton.styleFrom(
-                          backgroundColor: scheme.surface.withValues(
-                            alpha: 0.3,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
                         onPressed: _clearSavedCredentials,
                       ),
                     ),
@@ -323,11 +313,11 @@ class _LoginPageState extends State<LoginPage>
                           _entry(
                             1,
                             Text(
-                              'Linux.do',
+                              'LINUX.DO',
                               textAlign: TextAlign.center,
                               style: theme.textTheme.headlineMedium?.copyWith(
                                 fontWeight: FontWeight.w700,
-                                letterSpacing: -0.5,
+                                letterSpacing: 1.5,
                                 color: scheme.onSurface,
                               ),
                             ),
@@ -428,7 +418,7 @@ class _LoginPageState extends State<LoginPage>
         const SizedBox(height: 16),
         OutlinedButton.icon(
           onPressed: () => _loginWithWebView(),
-          icon: const Icon(Icons.open_in_browser, size: 20),
+          icon: const Icon(Symbols.open_in_browser_rounded, size: 20),
           label: const Text('其他方式登录 (OAuth / Passkey / 注册)'),
           style: OutlinedButton.styleFrom(
             minimumSize: const Size(double.infinity, 52),

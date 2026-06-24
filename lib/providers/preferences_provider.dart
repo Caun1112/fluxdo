@@ -8,7 +8,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../navigation/nav_action_bus.dart';
 import '../services/network/request_scheduler_config.dart';
 import '../services/cf_challenge_service.dart';
-import '../services/cf_clearance_refresh_service.dart';
 import 'theme_provider.dart';
 
 /// 嵌套视图连接线样式
@@ -143,9 +142,6 @@ class AppPreferences {
   /// 退出时清除图片缓存
   final bool clearCacheOnExit;
 
-  /// cf_clearance 自动续期
-  final bool cfClearanceRefresh;
-
   /// 拦截到 CF 盾时自动弹出验证页面
   final bool autoCfChallenge;
 
@@ -171,6 +167,9 @@ class AppPreferences {
 
   /// 显示用户签名
   final bool showSignatures;
+
+  /// Boost 弹幕化（默认关闭）
+  final bool boostDanmaku;
 
   /// 默认使用树形视图
   final bool defaultNestedView;
@@ -220,6 +219,9 @@ class AppPreferences {
   /// 长按菜单候选功能（按顺序展示在半圆菜单中）
   final List<ProgressGestureAction> progressGestureMenuActions;
 
+  /// 编辑器工具栏外显工具 id 列表（空 = 全部收进「更多」面板）
+  final List<String> editorToolbarTools;
+
   AppPreferences({
     required this.autoPanguSpacing,
     required this.displayPanguSpacing,
@@ -241,7 +243,6 @@ class AppPreferences {
     required this.portraitLock,
     required this.hideBarOnScroll,
     required this.clearCacheOnExit,
-    required this.cfClearanceRefresh,
     required this.autoCfChallenge,
     required this.expandRelatedLinks,
     required this.aiSwipeEntry,
@@ -250,6 +251,7 @@ class AppPreferences {
     this.hcaptchaCreateEndpoint,
     required this.dialogBlur,
     this.showSignatures = true,
+    this.boostDanmaku = false,
     this.defaultNestedView = false,
     this.nestedLineStyle = NestedLineStyle.auto,
     this.bookmarksOpenMode = BookmarksOpenMode.defaultRoute,
@@ -266,6 +268,7 @@ class AppPreferences {
     this.progressGestureSwipeUp = ProgressGestureAction.jumpToUnread,
     this.progressGestureLongPressEnabled = true,
     this.progressGestureMenuActions = _defaultProgressGestureMenu,
+    this.editorToolbarTools = const [],
   });
 
   AppPreferences copyWith({
@@ -289,7 +292,6 @@ class AppPreferences {
     bool? portraitLock,
     bool? hideBarOnScroll,
     bool? clearCacheOnExit,
-    bool? cfClearanceRefresh,
     bool? autoCfChallenge,
     bool? expandRelatedLinks,
     bool? aiSwipeEntry,
@@ -298,6 +300,7 @@ class AppPreferences {
     Object? hcaptchaCreateEndpoint = _unset,
     bool? dialogBlur,
     bool? showSignatures,
+    bool? boostDanmaku,
     bool? defaultNestedView,
     NestedLineStyle? nestedLineStyle,
     BookmarksOpenMode? bookmarksOpenMode,
@@ -314,6 +317,7 @@ class AppPreferences {
     ProgressGestureAction? progressGestureSwipeUp,
     bool? progressGestureLongPressEnabled,
     List<ProgressGestureAction>? progressGestureMenuActions,
+    List<String>? editorToolbarTools,
   }) {
     return AppPreferences(
       autoPanguSpacing: autoPanguSpacing ?? this.autoPanguSpacing,
@@ -339,7 +343,6 @@ class AppPreferences {
       portraitLock: portraitLock ?? this.portraitLock,
       hideBarOnScroll: hideBarOnScroll ?? this.hideBarOnScroll,
       clearCacheOnExit: clearCacheOnExit ?? this.clearCacheOnExit,
-      cfClearanceRefresh: cfClearanceRefresh ?? this.cfClearanceRefresh,
       autoCfChallenge: autoCfChallenge ?? this.autoCfChallenge,
       expandRelatedLinks: expandRelatedLinks ?? this.expandRelatedLinks,
       aiSwipeEntry: aiSwipeEntry ?? this.aiSwipeEntry,
@@ -352,6 +355,7 @@ class AppPreferences {
           : hcaptchaCreateEndpoint as String?,
       dialogBlur: dialogBlur ?? this.dialogBlur,
       showSignatures: showSignatures ?? this.showSignatures,
+      boostDanmaku: boostDanmaku ?? this.boostDanmaku,
       defaultNestedView: defaultNestedView ?? this.defaultNestedView,
       nestedLineStyle: nestedLineStyle ?? this.nestedLineStyle,
       bookmarksOpenMode: bookmarksOpenMode ?? this.bookmarksOpenMode,
@@ -378,6 +382,7 @@ class AppPreferences {
           this.progressGestureLongPressEnabled,
       progressGestureMenuActions:
           progressGestureMenuActions ?? this.progressGestureMenuActions,
+      editorToolbarTools: editorToolbarTools ?? this.editorToolbarTools,
     );
   }
 }
@@ -406,8 +411,6 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   static const String _portraitLockKey = 'pref_portrait_lock';
   static const String _hideBarOnScrollKey = 'pref_hide_bar_on_scroll';
   static const String _clearCacheOnExitKey = 'pref_clear_cache_on_exit';
-  static const String _cfClearanceRefreshKey =
-      CfClearanceRefreshService.prefKeyEnabled;
   static const String _autoCfChallengeKey = 'pref_auto_cf_challenge';
   static const String _expandRelatedLinksKey = 'pref_expand_related_links';
   static const String _aiSwipeEntryKey = 'pref_ai_swipe_entry';
@@ -417,6 +420,7 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
       'pref_hcaptcha_create_endpoint';
   static const String _dialogBlurKey = 'pref_dialog_blur';
   static const String _showSignaturesKey = 'pref_show_signatures';
+  static const String _boostDanmakuKey = 'pref_boost_danmaku';
   static const String _defaultNestedViewKey = 'pref_default_nested_view';
   static const String _nestedLineStyleKey = 'pref_nested_line_style';
   static const String _bookmarksOpenModeKey = 'pref_bookmarks_open_mode';
@@ -442,6 +446,7 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
       'pref_progress_gesture_long_press_enabled';
   static const String _progressGestureMenuActionsKey =
       'pref_progress_gesture_menu_actions';
+  static const String _editorToolbarToolsKey = 'pref_editor_toolbar_tools';
 
   static const _crashlyticsChannel = MethodChannel(
     'com.github.lingyan000.fluxdo/crashlytics',
@@ -476,7 +481,6 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
           portraitLock: _prefs.getBool(_portraitLockKey) ?? false,
           hideBarOnScroll: _prefs.getBool(_hideBarOnScrollKey) ?? true,
           clearCacheOnExit: _prefs.getBool(_clearCacheOnExitKey) ?? false,
-          cfClearanceRefresh: _prefs.getBool(_cfClearanceRefreshKey) ?? false,
           autoCfChallenge: _prefs.getBool(_autoCfChallengeKey) ?? true,
           expandRelatedLinks: _prefs.getBool(_expandRelatedLinksKey) ?? false,
           aiSwipeEntry: _prefs.getBool(_aiSwipeEntryKey) ?? false,
@@ -485,6 +489,7 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
           hcaptchaCreateEndpoint: _prefs.getString(_hcaptchaCreateEndpointKey),
           dialogBlur: _prefs.getBool(_dialogBlurKey) ?? true,
           showSignatures: _prefs.getBool(_showSignaturesKey) ?? true,
+          boostDanmaku: _prefs.getBool(_boostDanmakuKey) ?? false,
           defaultNestedView: _prefs.getBool(_defaultNestedViewKey) ?? false,
           nestedLineStyle: NestedLineStyle.fromString(
             _prefs.getString(_nestedLineStyleKey),
@@ -527,6 +532,8 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
           progressGestureMenuActions: _readGestureMenuActions(
             _prefs.getStringList(_progressGestureMenuActionsKey),
           ),
+          editorToolbarTools:
+              _prefs.getStringList(_editorToolbarToolsKey) ?? const [],
         ),
       ) {
     isPortraitLocked = state.portraitLock;
@@ -661,11 +668,6 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
     await _prefs.setBool(_clearCacheOnExitKey, enabled);
   }
 
-  Future<void> setCfClearanceRefresh(bool enabled) async {
-    state = state.copyWith(cfClearanceRefresh: enabled);
-    await CfClearanceRefreshService().setEnabled(enabled);
-  }
-
   Future<void> setAutoCfChallenge(bool enabled) async {
     state = state.copyWith(autoCfChallenge: enabled);
     await _prefs.setBool(_autoCfChallengeKey, enabled);
@@ -704,6 +706,12 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   Future<void> setShowSignatures(bool enabled) async {
     state = state.copyWith(showSignatures: enabled);
     await _prefs.setBool(_showSignaturesKey, enabled);
+  }
+
+  Future<void> setBoostDanmaku(bool enabled) async {
+    if (state.boostDanmaku == enabled) return;
+    state = state.copyWith(boostDanmaku: enabled);
+    await _prefs.setBool(_boostDanmakuKey, enabled);
   }
 
   Future<void> setDefaultNestedView(bool enabled) async {
@@ -821,6 +829,19 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
 
   Future<void> resetProgressGestureMenuActions() async {
     await setProgressGestureMenuActions(_defaultProgressGestureMenu);
+  }
+
+  /// 写入编辑器工具栏外显工具 id 列表（顺序无关，渲染按工具注册表顺序）
+  Future<void> setEditorToolbarTools(List<String> ids) async {
+    final deduped = ids.toSet().toList();
+    if (const ListEquality<String>().equals(
+      state.editorToolbarTools,
+      deduped,
+    )) {
+      return;
+    }
+    state = state.copyWith(editorToolbarTools: deduped);
+    await _prefs.setStringList(_editorToolbarToolsKey, deduped);
   }
 
   void _syncSchedulerConfig() {

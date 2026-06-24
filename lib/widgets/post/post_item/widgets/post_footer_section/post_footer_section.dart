@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
@@ -20,13 +21,14 @@ import '../post_action_bar.dart';
 import '../../../../bookmark/bookmark_edit_sheet_launcher.dart';
 import '../../../../post/post_boost/boost_list.dart';
 import '../../../../post/post_boost/boost_input.dart';
+import '../boost_flag_sheet.dart';
 import '../post_flag_sheet.dart';
-import '../post_reaction_picker.dart';
 import '../post_reaction_users_sheet.dart';
 import '../post_replies_list.dart';
 import '../post_solution_banner.dart';
 import '../../../../post/post_replies_sheet.dart';
 import '../../../../../utils/dialog_utils.dart';
+import '../../../../common/app_bottom_sheet.dart';
 
 part 'actions/bookmark_actions.dart';
 part 'actions/manage_actions.dart';
@@ -50,6 +52,7 @@ class PostFooterSection extends ConsumerStatefulWidget {
   final bool useReplyDialog;
   final String? topicTitle;
   final bool isPrivateMessageTopic;
+  final bool isPmWithNonHumanUser;
 
   /// 隐藏回复列表按钮（弹框内使用时不需要展示）
   final bool hideRepliesButton;
@@ -70,6 +73,13 @@ class PostFooterSection extends ConsumerStatefulWidget {
   /// 当前用于 "俺也一样" 按钮; 其他 post 传 null
   final Widget? opTopSlot;
 
+  /// 帖子级临时弹幕开关：true=强制按列表显示（覆盖全局弹幕偏好）
+  final bool forceShowBoostList;
+
+  /// 当前弹幕是否实际在显示（null = 当前帖子不展示弹幕；true/false = 显示与否），
+  /// 用于决定 "+ Boost" 火箭按钮是否出现在 action bar
+  final bool? danmakuActive;
+
   const PostFooterSection({
     super.key,
     required this.post,
@@ -87,17 +97,23 @@ class PostFooterSection extends ConsumerStatefulWidget {
     this.useReplyDialog = false,
     this.topicTitle,
     this.isPrivateMessageTopic = false,
+    this.isPmWithNonHumanUser = false,
     this.hideRepliesButton = false,
     this.onShowPostDetail,
     this.postDetailLabel,
     this.onBoostUpdated,
     this.highlightBoostUsername,
     this.opTopSlot,
+    this.forceShowBoostList = false,
+    this.danmakuActive,
   });
 
   @override
-  ConsumerState<PostFooterSection> createState() => _PostFooterSectionState();
+  ConsumerState<PostFooterSection> createState() => PostFooterSectionState();
 }
+
+// 公开 typedef，供外层(PostItem)通过 GlobalKey 调用 showBoostActions。
+typedef PostFooterSectionState = _PostFooterSectionState;
 
 class _PostFooterSectionState extends ConsumerState<PostFooterSection> {
   final DiscourseService _service = DiscourseService();
@@ -181,6 +197,20 @@ class _PostFooterSectionState extends ConsumerState<PostFooterSection> {
     );
   }
 
+  void _handleBoostChanged(Boost boost) {
+    if (!mounted) return;
+    final index = _boosts.indexWhere((b) => b.id == boost.id);
+    if (index == -1) return;
+    setState(() {
+      final updated = [..._boosts];
+      updated[index] = boost;
+      _boosts = updated;
+    });
+    widget.onBoostUpdated?.call(
+      widget.post.copyWith(boosts: List.from(_boosts), canBoost: _canBoost),
+    );
+  }
+
   List<Boost> _dedupeBoostsById(List<Boost> boosts) {
     final byId = <int, Boost>{};
     for (final boost in boosts) {
@@ -222,35 +252,155 @@ class _PostFooterSectionState extends ConsumerState<PostFooterSection> {
     }
   }
 
-  void _showBoostActions(Boost boost) {
-    final currentUser = ref.read(currentUserProvider).value;
-    final isOwn =
-        currentUser != null && boost.user.username == currentUser.username;
+  bool _shouldFetchBoostActionState({
+    required Boost boost,
+    required String currentUsername,
+  }) {
+    final isOwnBoost = currentUsername == boost.user.username;
+    if (isOwnBoost) {
+      return false;
+    }
+    if (boost.canFlag && boost.availableFlags == null) {
+      return true;
+    }
+    return !boost.canDelete &&
+        !boost.canFlag &&
+        boost.availableFlags == null &&
+        boost.userFlagStatus == null;
+  }
 
-    if (!isOwn && !boost.canDelete) return;
+  Future<Boost> _resolveBoostActionState({
+    required Boost boost,
+    required String currentUsername,
+  }) async {
+    if (!_shouldFetchBoostActionState(
+      boost: boost,
+      currentUsername: currentUsername,
+    )) {
+      return boost;
+    }
+    final detailedBoost = await _service.getBoost(boost.id);
+    if (mounted) {
+      _handleBoostChanged(detailedBoost);
+    }
+    return detailedBoost;
+  }
 
-    showModalBottomSheet(
+  Future<void> _refreshBoostAfterFlag(Boost boost) async {
+    try {
+      final updatedBoost = await _service.getBoost(boost.id);
+      if (!mounted) return;
+      _handleBoostChanged(updatedBoost);
+    } catch (_) {
+      if (!mounted) return;
+      _handleBoostChanged(
+        boost.copyWith(
+          canFlag: false,
+          userFlagStatus: boost.userFlagStatus ?? 1,
+        ),
+      );
+    }
+  }
+
+  void _showBoostFlagSheet(Boost boost) {
+    showAppBottomSheet(
       context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      enableDrag: false, // 举报表单(card):禁止下滑误关
+      builder: (context) => BoostFlagSheet(
+        boost: boost,
+        submitFlag: (flagTypeId, message) async {
+          await _service.flagBoost(
+            boost.id,
+            flagTypeId: flagTypeId,
+            message: message,
+          );
+          await _refreshBoostAfterFlag(boost);
+        },
+        onSuccess: () =>
+            ToastService.showSuccess(S.current.boost_flagSubmitted),
+      ),
+    );
+  }
+
+  Future<void> _showBoostActions(Boost boost) => showBoostActions(boost);
+
+  /// 提供给外层(PostItem)的公开入口，方便弹幕浮层复用同一份 boost actions。
+  Future<void> showBoostActions(Boost boost) async {
+    final currentUsername = ref.read(currentUserProvider).value?.username;
+    if (currentUsername == null || currentUsername.isEmpty) {
+      return;
+    }
+    Boost resolvedBoost;
+    try {
+      resolvedBoost = await _resolveBoostActionState(
+        boost: boost,
+        currentUsername: currentUsername,
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ToastService.showError(S.current.common_loadFailed);
+      return;
+    }
+    if (!mounted) return;
+    final canDelete = canDeleteBoostAction(
+      boost: resolvedBoost,
+      currentUsername: currentUsername,
+    );
+    if (boostAlreadyReportedByCurrentUser(
+          boost: resolvedBoost,
+          currentUsername: currentUsername,
+        ) &&
+        !canDelete) {
+      ToastService.showInfo(S.current.boost_flagAlreadyReported);
+      return;
+    }
+    final canFlag = canFlagBoostAction(
+      boost: resolvedBoost,
+      currentUsername: currentUsername,
+    );
+    if (!canOpenBoostActionMenu(
+      boost: resolvedBoost,
+      currentUsername: currentUsername,
+    )) {
+      return;
+    }
+
+    AppBottomSheet.show(
+      context: context,
+      contentPadding: EdgeInsets.zero,
       builder: (ctx) {
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (canFlag)
               ListTile(
-                leading: const Icon(Icons.delete_outline, color: Colors.red),
+                leading: const Icon(Symbols.flag_rounded, color: Colors.red),
+                title: Text(
+                  S.current.common_report,
+                  style: const TextStyle(color: Colors.red),
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showBoostFlagSheet(resolvedBoost);
+                },
+              ),
+            if (canDelete)
+              ListTile(
+                leading: const Icon(Symbols.delete_rounded, color: Colors.red),
                 title: Text(S.current.common_delete),
                 onTap: () {
                   Navigator.pop(ctx);
-                  _deleteBoost(boost);
+                  _deleteBoost(resolvedBoost);
                 },
               ),
-              ListTile(
-                leading: const Icon(Icons.close),
-                title: Text(S.current.common_cancel),
-                onTap: () => Navigator.pop(ctx),
-              ),
-            ],
-          ),
+            ListTile(
+              leading: const Icon(Symbols.close_rounded),
+              title: Text(S.current.common_cancel),
+              onTap: () => Navigator.pop(ctx),
+            ),
+          ],
         );
       },
     );
@@ -282,6 +432,24 @@ class _PostFooterSectionState extends ConsumerState<PostFooterSection> {
       if (!mounted) return;
       ToastService.showError(S.current.boost_failed);
     }
+  }
+
+  Widget _buildBoostArea(BuildContext context) {
+    final isDanmaku = ref.watch(
+      preferencesProvider.select((p) => p.boostDanmaku),
+    );
+    // 弹幕模式下隐藏 footer 中的 boost 气泡区，由 PostItem 在帖子内容上叠加渲染；
+    // 但帖子级临时关闭弹幕时需要回退到列表展示。
+    if (isDanmaku && !widget.forceShowBoostList) {
+      return const SizedBox.shrink();
+    }
+    return BoostList(
+      boosts: _boosts,
+      canBoost: _canBoost,
+      onAddBoost: _openBoostInput,
+      onBoostTap: _showBoostActions,
+      highlightUsername: widget.highlightBoostUsername,
+    );
   }
 
   @override
@@ -332,7 +500,7 @@ class _PostFooterSectionState extends ConsumerState<PostFooterSection> {
             showRepliesNotifier: _showRepliesNotifier,
             hideRepliesButton: widget.hideRepliesButton,
             onToggleLike: _toggleLike,
-            onShowReactionPicker: () => _showReactionPicker(context, theme),
+            onReactionSelected: _toggleReaction,
             onShowReactionUsers: (reactionId) =>
                 _showReactionUsers(context, reactionId: reactionId),
             onReply: widget.onReply == null ? null : () => widget.onReply!(),
@@ -340,17 +508,11 @@ class _PostFooterSectionState extends ConsumerState<PostFooterSection> {
             onToggleReplies: _toggleReplies,
             onAddBoost: _openBoostInput,
             canBoost: _canBoost,
-            hasBoosts: _boosts.isNotEmpty,
+            // 弹幕模式下 BoostList 不显示，把"+ Boost"按钮的位置让给 action bar
+            hasBoosts: _boosts.isNotEmpty && !(widget.danmakuActive == true),
           ),
-          // Boost 气泡列表
-          if (_boosts.isNotEmpty)
-            BoostList(
-              boosts: _boosts,
-              canBoost: _canBoost,
-              onAddBoost: _openBoostInput,
-              onBoostTap: _showBoostActions,
-              highlightUsername: widget.highlightBoostUsername,
-            ),
+          // Boost 气泡列表 / 弹幕
+          if (_boosts.isNotEmpty) _buildBoostArea(context),
           ValueListenableBuilder<bool>(
             valueListenable: _showRepliesNotifier,
             builder: (context, showReplies, _) {

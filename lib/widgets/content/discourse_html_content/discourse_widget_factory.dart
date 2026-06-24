@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_widget_from_html/flutter_widget_from_html.dart';
 import 'package:jovial_svg/jovial_svg.dart';
 import '../../../models/topic.dart';
@@ -98,18 +99,10 @@ class DiscourseWidgetFactory extends WidgetFactory {
       return _buildImageWidget(url, url, width, height, isEmoji, isOnlyEmoji: isOnlyEmoji, emojiTitle: emojiTitle, emojiFontSize: emojiFontSize);
     }
 
-    // upload:// 短链接：检查缓存
-    if (DiscourseImageUtils.isUploadUrlCached(url)) {
-      final resolvedUrl = DiscourseImageUtils.getCachedUploadUrl(url);
-      if (resolvedUrl != null) {
-        return _buildImageWidget(resolvedUrl, url, width, height, isEmoji, isOnlyEmoji: isOnlyEmoji, emojiTitle: emojiTitle, emojiFontSize: emojiFontSize);
-      }
-      // 解析失败的 URL，显示错误图标
-      return Icon(
-        Icons.broken_image,
-        color: Theme.of(context).colorScheme.outline,
-        size: 24,
-      );
+    // upload:// 短链接：命中缓存直接渲染（缓存仅含成功结果）
+    final cachedUrl = DiscourseImageUtils.getCachedUploadUrl(url);
+    if (cachedUrl != null) {
+      return _buildImageWidget(cachedUrl, url, width, height, isEmoji, isOnlyEmoji: isOnlyEmoji, emojiTitle: emojiTitle, emojiFontSize: emojiFontSize);
     }
 
     // upload:// 短链接首次加载：使用 FutureBuilder 解析
@@ -120,7 +113,7 @@ class DiscourseWidgetFactory extends WidgetFactory {
         // 解析失败
         if (snapshot.connectionState == ConnectionState.done && snapshot.data == null) {
           return Icon(
-            Icons.broken_image,
+            Symbols.broken_image_rounded,
             color: Theme.of(context).colorScheme.outline,
             size: 24,
           );
@@ -215,7 +208,7 @@ class DiscourseWidgetFactory extends WidgetFactory {
                    },
                    errorBuilder: (context, error, stackTrace) {
                      return Icon(
-                       Icons.broken_image,
+                       Symbols.broken_image_rounded,
                        color: Theme.of(context).colorScheme.outline,
                        size: isEmoji ? displaySize : 24,
                      );

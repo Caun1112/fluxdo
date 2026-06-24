@@ -6,7 +6,6 @@ import '../pages/topic_detail_page/topic_detail_page.dart';
 import '../pages/user_profile_page.dart';
 import '../pages/badge_page.dart';
 import '../services/local_notification_service.dart';
-import '../widgets/notification/notification_quick_panel.dart';
 
 NavigatorState? _rootNavigator(BuildContext context) {
   return navigatorKey.currentState ??
@@ -14,7 +13,6 @@ NavigatorState? _rootNavigator(BuildContext context) {
 }
 
 void _pushOnRootNavigator(BuildContext context, Widget page) {
-  NotificationQuickPanel.dismiss();
   _rootNavigator(context)?.push(MaterialPageRoute(builder: (_) => page));
 }
 
@@ -76,6 +74,22 @@ void handleNotificationTap(
             topicId: notification.topicId!,
             scrollToPostNumber: notification.postNumber,
             highlightBoostUsername: notification.data.displayUsername,
+          ),
+        );
+      }
+      break;
+
+    case NotificationType.edited:
+      // 帖子被编辑通知:跳转到对应话题 + 打开编辑历史 modal 到指定 revision。
+      // 对齐 discourse 网页版 `edited.js` 的 `setLastEditNotificationClick` 逻辑。
+      if (notification.topicId != null) {
+        _pushOnRootNavigator(
+          context,
+          TopicDetailPage(
+            topicId: notification.topicId!,
+            scrollToPostNumber: notification.postNumber,
+            initialRevisionPostNumber: notification.postNumber,
+            initialRevisionNumber: notification.data.revisionNumber,
           ),
         );
       }

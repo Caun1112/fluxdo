@@ -34,6 +34,7 @@ class DohProxyService {
   bool? _currentPreferIPv6;
   int? _currentPreferredPort;
   String? _currentServerIp;
+  bool? _currentH2Mitm;
   String? _currentUpstreamSignature;
   String? _lastError;
   // ignore: unused_field
@@ -71,6 +72,7 @@ class DohProxyService {
     String? upstreamCipher,
     String? caCertPem,
     String? caKeyPem,
+    bool h2Mitm = false,
   }) async {
     final upstreamSignature = _buildUpstreamSignature(
       protocol: upstreamProtocol,
@@ -81,14 +83,16 @@ class DohProxyService {
       cipher: upstreamCipher,
     );
     if (_isRunning) {
-      final sameConfig = _currentEnableDoh == enableDoh
-          && _currentGatewayMode == gatewayMode
-          && _currentDohServer == dohServer
-          && _currentDohServerEch == dohServerEch
-          && _currentPreferIPv6 == preferIPv6
-          && _currentPreferredPort == preferredPort
-          && _currentServerIp == serverIp
-          && _currentUpstreamSignature == upstreamSignature;
+      final sameConfig =
+          _currentEnableDoh == enableDoh &&
+          _currentGatewayMode == gatewayMode &&
+          _currentDohServer == dohServer &&
+          _currentDohServerEch == dohServerEch &&
+          _currentPreferIPv6 == preferIPv6 &&
+          _currentPreferredPort == preferredPort &&
+          _currentServerIp == serverIp &&
+          _currentH2Mitm == h2Mitm &&
+          _currentUpstreamSignature == upstreamSignature;
       if (sameConfig) {
         NetworkLogger.log('[DOH] 代理已在运行，端口: $_port');
         return true;
@@ -117,6 +121,7 @@ class DohProxyService {
         upstreamCipher,
         caCertPem,
         caKeyPem,
+        h2Mitm,
       );
       // 桌面平台 FFI 加载失败时，回退到进程模式
       if (!result && DohProxyFfi.canFallbackToProcess) {
@@ -136,6 +141,7 @@ class DohProxyService {
           upstreamUsername,
           upstreamPassword,
           upstreamCipher,
+          h2Mitm,
         );
       }
       return result;
@@ -154,6 +160,7 @@ class DohProxyService {
         upstreamUsername,
         upstreamPassword,
         upstreamCipher,
+        h2Mitm,
       );
     }
   }
@@ -175,6 +182,7 @@ class DohProxyService {
     String? upstreamCipher,
     String? caCertPem,
     String? caKeyPem,
+    bool h2Mitm,
   ) async {
     try {
       return await _enqueueFfiOp(() async {
@@ -200,6 +208,7 @@ class DohProxyService {
           upstreamCipher: upstreamCipher,
           caCertPem: caCertPem,
           caKeyPem: caKeyPem,
+          h2Mitm: h2Mitm,
         );
         if (resultPort <= 0) {
           // _callFfiStart 已设置更详细的 _lastError，仅在未设置时补充
@@ -217,6 +226,7 @@ class DohProxyService {
         _currentPreferIPv6 = preferIPv6;
         _currentPreferredPort = port;
         _currentServerIp = serverIp;
+        _currentH2Mitm = h2Mitm;
         _currentUpstreamSignature = _buildUpstreamSignature(
           protocol: upstreamProtocol,
           host: upstreamHost,
@@ -250,6 +260,7 @@ class DohProxyService {
     String? upstreamUsername,
     String? upstreamPassword,
     String? upstreamCipher,
+    bool h2Mitm,
   ) async {
     try {
       final executablePath = await _getExecutablePath();
@@ -268,11 +279,9 @@ class DohProxyService {
         preferredPort.toString(),
         if (!enableDoh) '--no-doh',
         if (gatewayMode) '--gateway',
+        if (h2Mitm) '--h2-mitm',
         if (preferIPv6) '--ipv6',
-        if (dohServer != null && dohServer.isNotEmpty) ...[
-          '--doh',
-          dohServer,
-        ],
+        if (dohServer != null && dohServer.isNotEmpty) ...['--doh', dohServer],
         if (dohServerEch != null && dohServerEch.isNotEmpty) ...[
           '--doh-server-ech',
           dohServerEch,
@@ -330,6 +339,7 @@ class DohProxyService {
           _currentPreferIPv6 = preferIPv6;
           _currentPreferredPort = preferredPort;
           _currentServerIp = serverIp;
+          _currentH2Mitm = h2Mitm;
           _currentUpstreamSignature = _buildUpstreamSignature(
             protocol: upstreamProtocol,
             host: upstreamHost,
@@ -440,6 +450,7 @@ class DohProxyService {
     _currentPreferIPv6 = null;
     _currentPreferredPort = null;
     _currentServerIp = null;
+    _currentH2Mitm = null;
     _currentUpstreamSignature = null;
     // 注意：不清除 _lastError，保留用于 UI 展示
   }
@@ -465,7 +476,8 @@ class DohProxyService {
       p.join(execDir, executableName),
       // 打包后：桌面平台统一收口到 native 子目录
       p.join(execDir, 'native', executableName),
-      if (Platform.isMacOS) p.join(execDir, '..', 'Resources', 'native', executableName),
+      if (Platform.isMacOS)
+        p.join(execDir, '..', 'Resources', 'native', executableName),
       // 打包后：assets 目录
       p.join(execDir, 'data', 'flutter_assets', 'assets', executableName),
       // 开发时：通过 app bundle 路径反推项目根目录
@@ -475,26 +487,78 @@ class DohProxyService {
           final projectRoot = execPath.substring(0, buildIdx);
           return [
             if (Platform.isWindows)
-              p.join(projectRoot, 'windows', 'runner', 'native', executableName),
+              p.join(
+                projectRoot,
+                'windows',
+                'runner',
+                'native',
+                executableName,
+              ),
             if (Platform.isMacOS)
               p.join(projectRoot, 'macos', 'Runner', 'native', executableName),
             if (Platform.isLinux)
               p.join(projectRoot, 'linux', 'runner', 'native', executableName),
-            p.join(projectRoot, 'core', 'doh_proxy', 'target', 'release', executableName),
-            p.join(projectRoot, 'core', 'doh_proxy', 'target', 'debug', executableName),
+            p.join(
+              projectRoot,
+              'core',
+              'doh_proxy',
+              'target',
+              'release',
+              executableName,
+            ),
+            p.join(
+              projectRoot,
+              'core',
+              'doh_proxy',
+              'target',
+              'debug',
+              executableName,
+            ),
           ];
         }
         return <String>[];
       }(),
       // 开发时：CWD 可能是项目根目录
       if (Platform.isWindows)
-        p.join(Directory.current.path, 'windows', 'runner', 'native', executableName),
+        p.join(
+          Directory.current.path,
+          'windows',
+          'runner',
+          'native',
+          executableName,
+        ),
       if (Platform.isMacOS)
-        p.join(Directory.current.path, 'macos', 'Runner', 'native', executableName),
+        p.join(
+          Directory.current.path,
+          'macos',
+          'Runner',
+          'native',
+          executableName,
+        ),
       if (Platform.isLinux)
-        p.join(Directory.current.path, 'linux', 'runner', 'native', executableName),
-      p.join(Directory.current.path, 'core', 'doh_proxy', 'target', 'release', executableName),
-      p.join(Directory.current.path, 'core', 'doh_proxy', 'target', 'debug', executableName),
+        p.join(
+          Directory.current.path,
+          'linux',
+          'runner',
+          'native',
+          executableName,
+        ),
+      p.join(
+        Directory.current.path,
+        'core',
+        'doh_proxy',
+        'target',
+        'release',
+        executableName,
+      ),
+      p.join(
+        Directory.current.path,
+        'core',
+        'doh_proxy',
+        'target',
+        'debug',
+        executableName,
+      ),
     ];
 
     for (final path in possiblePaths) {
@@ -548,10 +612,7 @@ class DohProxyService {
     return _enqueueFfiOp(() async {
       final sendPort = await _ensureFfiIsolate();
       final response = ReceivePort();
-      sendPort.send({
-        'cmd': 'generate_ca',
-        'replyTo': response.sendPort,
-      });
+      sendPort.send({'cmd': 'generate_ca', 'replyTo': response.sendPort});
       final result = await response.first;
       response.close();
       if (result is Map && result['ok'] == true) {
@@ -585,11 +646,7 @@ class DohProxyService {
           const [];
     }
     return _enqueueFfiOp(
-      () => _callFfiLookupIp(
-        host,
-        dohServer,
-        preferIpv6: preferIpv6,
-      ),
+      () => _callFfiLookupIp(host, dohServer, preferIpv6: preferIpv6),
     );
   }
 
@@ -625,6 +682,20 @@ class DohProxyService {
       return DohProxyFfi.instance.clearDnsCache();
     }
     return _enqueueFfiOp(_callFfiClearDnsCache);
+  }
+
+  Future<DohDnsCacheStats?> dnsCacheStats() async {
+    if (!DohProxyFfi.isAvailable) {
+      return DohProxyFfi.instance.dnsCacheStats();
+    }
+    return _enqueueFfiOp(_callFfiDnsCacheStats);
+  }
+
+  Future<List<DohDnsCacheRecord>?> dnsCacheRecords() async {
+    if (!DohProxyFfi.isAvailable) {
+      return DohProxyFfi.instance.dnsCacheRecords();
+    }
+    return _enqueueFfiOp(_callFfiDnsCacheRecords);
   }
 
   Future<bool> recordHostSuccess(
@@ -707,6 +778,7 @@ class DohProxyService {
     required String? upstreamCipher,
     String? caCertPem,
     String? caKeyPem,
+    bool h2Mitm = false,
   }) async {
     final sendPort = await _ensureFfiIsolate();
     final response = ReceivePort();
@@ -715,6 +787,7 @@ class DohProxyService {
       'port': port,
       'enableDoh': enableDoh,
       'gatewayMode': gatewayMode,
+      'h2Mitm': h2Mitm,
       'preferIpv6': preferIpv6,
       'dohServer': dohServer,
       'dohServerEch': dohServerEch,
@@ -744,10 +817,7 @@ class DohProxyService {
   Future<void> _callFfiStop() async {
     final sendPort = await _ensureFfiIsolate();
     final response = ReceivePort();
-    sendPort.send({
-      'cmd': 'stop',
-      'replyTo': response.sendPort,
-    });
+    sendPort.send({'cmd': 'stop', 'replyTo': response.sendPort});
     final result = await response.first;
     response.close();
     if (result is Map && result['ok'] != true) {
@@ -762,10 +832,7 @@ class DohProxyService {
   Future<Map<String, dynamic>> _callFfiStatus() async {
     final sendPort = await _ensureFfiIsolate();
     final response = ReceivePort();
-    sendPort.send({
-      'cmd': 'status',
-      'replyTo': response.sendPort,
-    });
+    sendPort.send({'cmd': 'status', 'replyTo': response.sendPort});
     final result = await response.first;
     response.close();
     if (result is Map<String, dynamic>) return result;
@@ -857,13 +924,43 @@ class DohProxyService {
   Future<bool> _callFfiClearDnsCache() async {
     final sendPort = await _ensureFfiIsolate();
     final response = ReceivePort();
-    sendPort.send({
-      'cmd': 'clear_dns_cache',
-      'replyTo': response.sendPort,
-    });
+    sendPort.send({'cmd': 'clear_dns_cache', 'replyTo': response.sendPort});
     final result = await response.first;
     response.close();
     return result is Map && result['ok'] == true;
+  }
+
+  Future<DohDnsCacheStats?> _callFfiDnsCacheStats() async {
+    final sendPort = await _ensureFfiIsolate();
+    final response = ReceivePort();
+    sendPort.send({'cmd': 'dns_cache_stats', 'replyTo': response.sendPort});
+    final result = await response.first;
+    response.close();
+    if (result is Map && result['ok'] == true && result['data'] is Map) {
+      return DohDnsCacheStats.fromJson(
+        (result['data'] as Map).cast<String, dynamic>(),
+      );
+    }
+    return null;
+  }
+
+  Future<List<DohDnsCacheRecord>?> _callFfiDnsCacheRecords() async {
+    final sendPort = await _ensureFfiIsolate();
+    final response = ReceivePort();
+    sendPort.send({'cmd': 'dns_cache_records', 'replyTo': response.sendPort});
+    final result = await response.first;
+    response.close();
+    if (result is Map && result['ok'] == true && result['records'] is List) {
+      return (result['records'] as List)
+          .whereType<Map>()
+          .map(
+            (record) =>
+                DohDnsCacheRecord.fromJson(record.cast<String, dynamic>()),
+          )
+          .where((record) => record.host.isNotEmpty && record.kind.isNotEmpty)
+          .toList();
+    }
+    return null;
   }
 
   Future<bool> _callFfiRecordHostSuccess(
@@ -977,6 +1074,7 @@ void _ffiIsolateEntry(SendPort mainSendPort) {
           final preferredPort = message['preferredPort'] as int? ?? 0;
           final enableDoh = message['enableDoh'] as bool? ?? true;
           final gatewayMode = message['gatewayMode'] as bool? ?? false;
+          final h2Mitm = message['h2Mitm'] as bool? ?? false;
           final preferIpv6 = message['preferIpv6'] as bool? ?? false;
           final dohServer = message['dohServer'] as String?;
           final dohServerEch = message['dohServerEch'] as String?;
@@ -1005,6 +1103,7 @@ void _ffiIsolateEntry(SendPort mainSendPort) {
             upstreamCipher: upstreamCipher,
             caCertPem: caCertPem,
             caKeyPem: caKeyPem,
+            h2Mitm: h2Mitm,
           );
           if (resultPort <= 0 && preferredPort != 0) {
             resultPort = DohProxyFfi.instance.start(
@@ -1023,6 +1122,7 @@ void _ffiIsolateEntry(SendPort mainSendPort) {
               upstreamCipher: upstreamCipher,
               caCertPem: caCertPem,
               caKeyPem: caKeyPem,
+              h2Mitm: h2Mitm,
             );
           }
           if (resultPort <= 0) {
@@ -1067,7 +1167,8 @@ void _ffiIsolateEntry(SendPort mainSendPort) {
           final host = message['host'] as String? ?? '';
           final dohServer = message['dohServer'] as String? ?? '';
           final preferIpv6 = message['preferIpv6'] as bool? ?? false;
-          final addrs = DohProxyFfi.instance.lookupIp(
+          final addrs =
+              DohProxyFfi.instance.lookupIp(
                 host,
                 dohServer,
                 preferIpv6: preferIpv6,
@@ -1115,6 +1216,31 @@ void _ffiIsolateEntry(SendPort mainSendPort) {
         case 'clear_dns_cache':
           final ok = DohProxyFfi.instance.clearDnsCache();
           replyTo.send({'ok': ok});
+          return;
+        case 'dns_cache_stats':
+          final stats = DohProxyFfi.instance.dnsCacheStats();
+          replyTo.send({
+            'ok': true,
+            'data': stats == null
+                ? null
+                : {
+                    'resolver_count': stats.resolverCount,
+                    'host_count': stats.hostCount,
+                    'ip_count': stats.ipCount,
+                    'ech_count': stats.echCount,
+                    'ech_negative_count': stats.echNegativeCount,
+                    'ip_rtt_count': stats.ipRttCount,
+                    'preferred_ip_count': stats.preferredIpCount,
+                    'total_entries': stats.totalEntries,
+                  },
+          });
+          return;
+        case 'dns_cache_records':
+          final records = DohProxyFfi.instance.dnsCacheRecords();
+          replyTo.send({
+            'ok': true,
+            'records': records?.map((record) => record.toJson()).toList(),
+          });
           return;
         case 'record_host_success':
           final host = message['host'] as String? ?? '';

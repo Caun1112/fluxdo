@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../l10n/s.dart';
@@ -17,6 +18,7 @@ import '../services/app_error_handler.dart';
 import '../services/discourse/discourse_service.dart';
 import '../services/toast_service.dart';
 import '../utils/dialog_utils.dart';
+import '../utils/load_more_coordinator.dart';
 import '../utils/platform_utils.dart';
 import '../widgets/bookmark/bookmark_edit_sheet_launcher.dart';
 import '../widgets/bookmark/bookmarks_list_content.dart';
@@ -52,6 +54,7 @@ class BookmarksPage extends ConsumerStatefulWidget {
 
 class _BookmarksPageState extends ConsumerState<BookmarksPage> {
   final ScrollController _scrollController = ScrollController();
+  final LoadMoreCoordinator _loadMoreCoordinator = LoadMoreCoordinator();
   late final UserContentSearchNotifier _searchNotifier;
   late final double Function() _readBarVisibility;
   late final void Function(double value) _writeBarVisibility;
@@ -92,10 +95,22 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
 
   void _onScroll() {
     _publishScrollProgress();
-    if (_scrollController.position.pixels >=
-        _scrollController.position.maxScrollExtent - 200) {
-      ref.read(bookmarksProvider.notifier).loadMore();
+    final distance =
+        _scrollController.position.maxScrollExtent -
+        _scrollController.position.pixels;
+    if (_loadMoreCoordinator.shouldTriggerForDistance(distance)) {
+      _loadMore();
     }
+  }
+
+  Future<void> _loadMore() async {
+    final notifier = ref.read(bookmarksProvider.notifier);
+    await _loadMoreCoordinator.loadMore(
+      loadMore: notifier.loadMore,
+      hasMore: () => notifier.hasMore,
+      isActive: () => mounted,
+      progressCount: () => ref.read(bookmarksProvider).value?.length ?? 0,
+    );
   }
 
   void _publishScrollProgress() {
@@ -113,6 +128,7 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
   }
 
   Future<void> _onRefresh() async {
+    _loadMoreCoordinator.resetCooldown();
     await ref.read(bookmarksProvider.notifier).refresh();
   }
 
@@ -131,10 +147,7 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
     }
     if (report.hasChange) {
       ToastService.showSuccess(
-        S.current.bookmarks_syncCompleted(
-          report.upserted,
-          report.deleted,
-        ),
+        S.current.bookmarks_syncCompleted(report.upserted, report.deleted),
       );
     } else {
       ToastService.showSuccess(S.current.bookmarks_syncUpToDate);
@@ -379,8 +392,8 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
                           ),
                           leading: Icon(
                             selected
-                                ? Icons.radio_button_checked
-                                : Icons.radio_button_unchecked,
+                                ? Symbols.radio_button_checked_rounded
+                                : Symbols.radio_button_unchecked_rounded,
                             color: selected
                                 ? theme.colorScheme.primary
                                 : theme.colorScheme.outline,
@@ -410,7 +423,7 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
                               });
                               Navigator.pop(sheetContext);
                             },
-                            icon: const Icon(Icons.close_rounded),
+                            icon: const Icon(Symbols.close_rounded),
                           ),
                         );
                       },
@@ -490,13 +503,13 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
               key: const ValueKey('bookmark-workspace-mobile-back'),
               tooltip: MaterialLocalizations.of(context).backButtonTooltip,
               onPressed: _activateBookmarksTab,
-              icon: const Icon(Icons.arrow_back),
+              icon: const Icon(Symbols.arrow_back_rounded),
             ),
             IconButton(
               key: const ValueKey('bookmark-workspace-mobile-close'),
               tooltip: context.l10n.common_close,
               onPressed: _closeActiveWorkspaceTab,
-              icon: const Icon(Icons.close_rounded),
+              icon: const Icon(Symbols.close_rounded),
             ),
             Expanded(
               child: Text(
@@ -528,7 +541,7 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
       ),
       actions: [
         IconButton(
-          icon: const Icon(Icons.search),
+          icon: const Icon(Symbols.search_rounded),
           onPressed: () => _onSearchPressed(true),
           tooltip: context.l10n.common_search,
         ),
@@ -556,7 +569,7 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
               height: 18,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          : const Icon(Icons.sync),
+          : const Icon(Symbols.sync_rounded),
     );
   }
 

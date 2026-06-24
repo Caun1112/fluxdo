@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:super_clipboard/super_clipboard.dart';
@@ -336,13 +337,17 @@ class _ShareImagePreviewState extends ConsumerState<ShareImagePreview> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.error_outline, size: 48, color: theme.colorScheme.error),
+            Icon(
+              Symbols.error_rounded,
+              size: 48,
+              color: theme.colorScheme.error,
+            ),
             const SizedBox(height: 16),
             Text(_loadError!),
             const SizedBox(height: 16),
             FilledButton.icon(
               onPressed: _fetchMainPost,
-              icon: const Icon(Icons.refresh),
+              icon: const Icon(Symbols.refresh_rounded),
               label: Text(S.current.common_retry),
             ),
           ],
@@ -513,7 +518,7 @@ class _ShareImagePreviewState extends ConsumerState<ShareImagePreview> {
               children: [
                 IconButton(
                   onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.close),
+                  icon: const Icon(Symbols.close_rounded),
                 ),
                 Expanded(
                   child: Text(
@@ -579,7 +584,7 @@ class _ShareImagePreviewState extends ConsumerState<ShareImagePreview> {
                             ),
                             child: isSelected
                                 ? Icon(
-                                    Icons.check,
+                                    Symbols.check_rounded,
                                     size: 18,
                                     color: t.isDark
                                         ? Colors.white
@@ -668,7 +673,7 @@ class _ShareImagePreviewState extends ConsumerState<ShareImagePreview> {
                             height: 18,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Icon(Icons.copy, size: 18),
+                        : const Icon(Symbols.content_copy_rounded, size: 18),
                     label: Text(context.l10n.common_copy),
                     style: OutlinedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 12),
@@ -688,8 +693,8 @@ class _ShareImagePreviewState extends ConsumerState<ShareImagePreview> {
                             height: 18,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Icon(Icons.save_alt, size: 18),
-                    label: Text(context.l10n.common_save),
+                        : const Icon(Symbols.save_alt_rounded, size: 18),
+                    label: Text(context.l10n.share_saveToGallery),
                     style: OutlinedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                     ),
@@ -711,7 +716,7 @@ class _ShareImagePreviewState extends ConsumerState<ShareImagePreview> {
                               color: Colors.white,
                             ),
                           )
-                        : const Icon(Icons.share, size: 18),
+                        : const Icon(Symbols.share_rounded, size: 18),
                     label: Text(context.l10n.common_share),
                     style: FilledButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 12),

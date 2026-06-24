@@ -1,12 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../models/sticker.dart';
 import '../../providers/sticker_provider.dart';
 import '../../services/discourse_cache_manager.dart';
+import '../../utils/load_more_coordinator.dart';
+import '../common/app_bottom_sheet.dart';
 import '../common/cached_image.dart';
 import '../common/loading_spinner.dart';
+import '../common/paged_list_footer.dart';
 import '../../../../../l10n/s.dart';
 
 /// 表情包市场浏览面板 (Bottom Sheet)
@@ -22,7 +26,10 @@ class StickerMarketSheet extends ConsumerStatefulWidget {
 
 class _StickerMarketSheetState extends ConsumerState<StickerMarketSheet> {
   final ScrollController _scrollController = ScrollController();
-  bool _scrollThrottled = false;
+  final LoadMoreCoordinator _loadMoreCoordinator = LoadMoreCoordinator(
+    triggerDistance: 600,
+    releaseDistance: 600,
+  );
 
   @override
   void initState() {
@@ -37,103 +44,60 @@ class _StickerMarketSheetState extends ConsumerState<StickerMarketSheet> {
   }
 
   void _onScroll() {
-    if (!_scrollController.hasClients || _scrollThrottled) return;
-    _scrollThrottled = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scrollThrottled = false;
-      if (!mounted || !_scrollController.hasClients) return;
-      final pos = _scrollController.position;
-      if (pos.pixels >= pos.maxScrollExtent - 600) {
-        ref.read(marketGroupsProvider.notifier).loadMore();
-      }
-    });
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    final distance = pos.maxScrollExtent - pos.pixels;
+    if (_loadMoreCoordinator.shouldTriggerForDistance(distance)) {
+      _loadMore();
+    }
+  }
+
+  Future<void> _loadMore() async {
+    final notifier = ref.read(marketGroupsProvider.notifier);
+    await _loadMoreCoordinator.loadMore(
+      loadMore: notifier.loadMore,
+      hasMore: () => notifier.hasMore,
+      isActive: () => mounted,
+      progressCount: () => ref.read(marketGroupsProvider).value?.length ?? 0,
+    );
+  }
+
+  Future<void> _retryLoadMore() async {
+    _loadMoreCoordinator.resetCooldown();
+    await ref.read(marketGroupsProvider.notifier).retryLoadMore();
   }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final mediaQuery = MediaQuery.of(context);
     final groupsAsync = ref.watch(marketGroupsProvider);
-    // 不再 watch subscribedStickerIdsProvider:每个 _StickerGroupTile 自己
-    // 用 select 监听自己 group.id 的订阅状态变化,避免任意 group 订阅状态
-    // 变化导致整个 ListView rebuild。
 
-    return Container(
-      height: mediaQuery.size.height * 0.8,
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      child: Column(
-        children: [
-          // 顶部标题栏
-          Container(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(
-                  color: theme.colorScheme.outlineVariant.withValues(
-                    alpha: 0.5,
-                  ),
-                  width: 0.5,
-                ),
-              ),
-            ),
-            child: Column(
-              children: [
-                // 拖拽条
-                Container(
-                  width: 32,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 12),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.outlineVariant.withValues(
-                      alpha: 0.5,
-                    ),
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        S.current.sticker_marketTitle,
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () => Navigator.pop(context),
-                      style: TextButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                      ),
-                      child: Text(S.current.common_done),
-                    ),
-                  ],
-                ),
-              ],
-            ),
+    return AppSheetScaffold(
+      title: S.current.sticker_marketTitle,
+      showCloseButton: false,
+      showTitleDivider: true,
+      contentPadding: EdgeInsets.zero,
+      maxHeightFactor: 0.8,
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          style: TextButton.styleFrom(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
           ),
-
-          // 内容区域：优先使用已有数据，避免加载态闪烁
-          Expanded(
-            child: (() {
-              final groups = groupsAsync.value;
-              if (groups != null) {
-                return _buildGroupList(groups);
-              }
-              return groupsAsync.when(
-                data: (groups) => _buildGroupList(groups),
-                loading: () => const Center(child: LoadingSpinner()),
-                error: (err, stack) => _buildError(),
-              );
-            })(),
-          ),
-        ],
-      ),
+          child: Text(S.current.common_done),
+        ),
+      ],
+      child: (() {
+        final groups = groupsAsync.value;
+        if (groups != null) {
+          return _buildGroupList(groups);
+        }
+        return groupsAsync.when(
+          data: (groups) => _buildGroupList(groups),
+          loading: () => const Center(child: LoadingSpinner()),
+          error: (err, stack) => _buildError(),
+        );
+      })(),
     );
   }
 
@@ -143,12 +107,18 @@ class _StickerMarketSheetState extends ConsumerState<StickerMarketSheet> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.error_outline, size: 48, color: theme.colorScheme.outline),
+          Icon(Symbols.error_rounded, size: 48, color: theme.colorScheme.outline),
           const SizedBox(height: 12),
-          Text(S.current.sticker_marketLoadFailed, style: TextStyle(color: theme.colorScheme.error)),
+          Text(
+            S.current.sticker_marketLoadFailed,
+            style: TextStyle(color: theme.colorScheme.error),
+          ),
           const SizedBox(height: 8),
           TextButton(
-            onPressed: () => ref.read(marketGroupsProvider.notifier).refresh(),
+            onPressed: () {
+              _loadMoreCoordinator.resetCooldown();
+              ref.read(marketGroupsProvider.notifier).refresh();
+            },
             child: Text(S.current.common_retry),
           ),
         ],
@@ -168,8 +138,8 @@ class _StickerMarketSheetState extends ConsumerState<StickerMarketSheet> {
       );
     }
 
-    final hasMore = ref.read(marketGroupsProvider.notifier).hasMore;
-    final itemCount = groups.length + (hasMore ? 1 : 0);
+    final notifier = ref.read(marketGroupsProvider.notifier);
+    final itemCount = groups.length + 1;
 
     return ListView.builder(
       controller: _scrollController,
@@ -182,23 +152,15 @@ class _StickerMarketSheetState extends ConsumerState<StickerMarketSheet> {
       itemCount: itemCount,
       itemBuilder: (context, index) {
         if (index >= groups.length) {
-          // 底部加载指示器
-          return const Padding(
-            padding: EdgeInsets.symmetric(vertical: 24),
-            child: Center(
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator.adaptive(strokeWidth: 2),
-              ),
-            ),
+          return PagedListFooter(
+            hasMore: notifier.hasMore,
+            isLoadingMore: notifier.isLoadingMore,
+            isLoadMoreFailed: notifier.isLoadMoreFailed,
+            onRetry: _retryLoadMore,
           );
         }
         final group = groups[index];
-        return _StickerGroupTile(
-          key: ValueKey(group.id),
-          group: group,
-        );
+        return _StickerGroupTile(key: ValueKey(group.id), group: group);
       },
     );
   }
@@ -212,10 +174,7 @@ class _StickerMarketSheetState extends ConsumerState<StickerMarketSheet> {
 class _StickerGroupTile extends ConsumerWidget {
   final StickerGroup group;
 
-  const _StickerGroupTile({
-    super.key,
-    required this.group,
-  });
+  const _StickerGroupTile({super.key, required this.group});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -250,7 +209,7 @@ class _StickerGroupTile extends ConsumerWidget {
         trailing: isSubscribed
             ? FilledButton.tonalIcon(
                 onPressed: onToggle,
-                icon: const Icon(Icons.check, size: 16),
+                icon: const Icon(Symbols.check_rounded, size: 16),
                 label: Text(S.current.sticker_added),
                 style: FilledButton.styleFrom(
                   visualDensity: VisualDensity.compact,
@@ -259,7 +218,7 @@ class _StickerGroupTile extends ConsumerWidget {
               )
             : OutlinedButton.icon(
                 onPressed: onToggle,
-                icon: const Icon(Icons.add, size: 16),
+                icon: const Icon(Symbols.add_rounded, size: 16),
                 label: Text(S.current.common_add),
                 style: OutlinedButton.styleFrom(
                   visualDensity: VisualDensity.compact,

@@ -34,10 +34,16 @@ class CookieJarService {
   /// 这些是 Discourse 内核约定的 cookie 名,
   /// 用于 boundary_sync_service / webview_login_page / 诊断接口的
   /// "Discourse 登录态"判断, 不应混入其他业务 cookie。
-  static const Set<String> sessionCookieNames = {
-    '_t',
-    '_forum_session',
-  };
+  static const Set<String> sessionCookieNames = {'_t', '_forum_session'};
+
+  /// 登录收口需要同步的核心 cookie 集合。
+  ///
+  /// 额外由页面脚本/服务端风控产生的 cookie 不在这里按名字维护，
+  /// 由 WebViewSessionCookieRefreshService 加载页面后统一同步。
+  static const Set<String> authCookieNames = {...sessionCookieNames};
+
+  /// 主域 host-only cookie。
+  static const Set<String> hostOnlyCookieNames = {...authCookieNames};
 
   /// WV 必须保持与 jar 同步的关键 cookie 集合。
   ///
@@ -47,12 +53,12 @@ class CookieJarService {
   /// - 该 cookie 是否会出现在主站 (linux.do) 响应中
   ///
   /// 当前条目:
-  /// - sessionCookieNames: Discourse 论坛登录
+  /// - authCookieNames: Discourse 论坛登录 cookie
   /// - cf_clearance: Cloudflare 反爬虫挑战 token
   /// - linux_do_credit_session_id: LDC 应用 session,主站会读它来显示
   ///   LDC 积分/绑定状态, WV 缺失会导致 LDC 相关 UI 失效
   static Set<String> criticalCookieNames = {
-    ...sessionCookieNames,
+    ...authCookieNames,
     'cf_clearance',
     'linux_do_credit_session_id',
   };
@@ -105,50 +111,195 @@ class CookieJarService {
     await _migrateSessionCookiesToHostOnly();
   }
 
-  /// 历史脏数据迁移: 把 sessionCookieNames 里被错误存为 domain cookie
-  /// 的 _t / _forum_session 改回 host-only。
+  /// 历史脏数据迁移: 把 authCookieNames 收敛成主域 host-only 单副本。
   ///
   /// 触发原因: 早期版本 boundary_sync 把 WebView 回读的裸 host(无前导点)
   /// 当作 Domain= 直接写入 jar, 导致 _t 等 host-only cookie 变成 domain
-  /// cookie 挂到 connect.linux.do / cdk.linux.do 等子域名上。修复后此处
-  /// 把存量数据原地校正, 避免老用户继续受影响。
+  /// cookie 挂到 connect.linux.do / cdk.linux.do 等子域名上；另一些版本会把
+  /// `_t` 存成不同 path。这里统一收敛，避免老用户继续受影响。
   Future<void> _migrateSessionCookiesToHostOnly() async {
+    await enforceAuthCookiePolicy(reason: 'legacy_migration');
+  }
+
+  /// 强制登录态 cookie 的站点单例策略。
+  ///
+  /// `_t` / `_forum_session` 是 Discourse 主站登录态，只应存在一份：
+  /// `(hostOnly=true, domain=baseHost, path=/)`。WebView/CDP 回读时经常会把
+  /// host-only cookie 表现成 `domain=linux.do`，或者在不同 path/domain 下留下
+  /// 副本；这些副本不能进入 jar 的长期状态。
+  Future<int> enforceAuthCookiePolicy({
+    String reason = 'unknown',
+    Iterable<String>? names,
+  }) async {
+    if (!_initialized) await initialize();
+
     final jar = _cookieJar;
-    if (jar is! EnhancedPersistCookieJar) return;
+    if (jar is! EnhancedPersistCookieJar) return 0;
 
     try {
-      final baseHost = Uri.parse(AppConstants.baseUrl).host.toLowerCase();
+      final baseUri = Uri.parse(AppConstants.baseUrl);
+      final baseHost = baseUri.host.toLowerCase();
+      final targetNames = (names ?? hostOnlyCookieNames)
+          .where(hostOnlyCookieNames.contains)
+          .toSet();
+      if (targetNames.isEmpty) return 0;
+
       final all = await jar.readAllCookies();
-      final patched = <CanonicalCookie>[];
+      var changed = 0;
 
-      for (final cookie in all) {
-        if (!sessionCookieNames.contains(cookie.name)) continue;
-        if (cookie.hostOnly) continue;
-        final normalized = cookie.normalizedDomain;
-        if (normalized != baseHost) continue;
+      for (final name in targetNames) {
+        final candidates = all
+            .where(
+              (cookie) =>
+                  cookie.name == name &&
+                  matchesAppHost(cookie.normalizedDomain ?? cookie.domain),
+            )
+            .toList(growable: false);
+        if (candidates.isEmpty) continue;
 
-        patched.add(
-          cookie.copyWith(
-            hostOnly: true,
-            domain: baseHost,
-          ),
+        final active = candidates
+            .where(_isActiveAuthCookieCandidate)
+            .toList(growable: false);
+        if (active.isEmpty) {
+          final removed = await jar.replaceByNameForSite(
+            baseUri,
+            name,
+            const [],
+          );
+          if (removed > 0) {
+            changed++;
+            debugPrint(
+              '[CookieJar] Auth cookie policy removed $name variants: '
+              'reason=$reason removed=$removed',
+            );
+          }
+          continue;
+        }
+
+        final winner = _selectBestAuthCookie(active, baseHost);
+        final normalized = _normalizeAuthCookie(winner, baseUri);
+
+        if (candidates.length == 1 &&
+            _isCanonicalAuthCookie(candidates.single, normalized, baseHost)) {
+          continue;
+        }
+
+        final removed = await jar.replaceByNameForSite(baseUri, name, [
+          normalized,
+        ]);
+        changed++;
+        debugPrint(
+          '[CookieJar] Auth cookie policy normalized $name: '
+          'reason=$reason candidates=${candidates.length} removed=$removed '
+          'domain=${normalized.domain} path=${normalized.path} '
+          'hostOnly=${normalized.hostOnly} len=${normalized.value.length}',
         );
       }
 
-      if (patched.isEmpty) return;
-
-      // saveCanonicalCookies 的 storageKey 不含 hostOnly,
-      // 同 (name, domain, path) 的旧条目会被替换为 hostOnly=true 版本。
-      await jar.saveCanonicalCookies(
-        Uri.parse(AppConstants.baseUrl),
-        patched,
-      );
-      debugPrint(
-        '[CookieJar] Migrated ${patched.length} session cookie(s) back to host-only',
-      );
+      return changed;
     } catch (e) {
-      debugPrint('[CookieJar] Session cookie migration failed: $e');
+      debugPrint('[CookieJar] Auth cookie policy failed: $e');
+      return 0;
     }
+  }
+
+  bool _isActiveAuthCookieCandidate(CanonicalCookie cookie) {
+    if (cookie.value.isEmpty || cookie.value == 'del') return false;
+    return !cookie.isExpired;
+  }
+
+  CanonicalCookie _selectBestAuthCookie(
+    List<CanonicalCookie> cookies,
+    String baseHost,
+  ) {
+    final sorted = [...cookies]
+      ..sort((a, b) => _compareAuthCookie(a, b, baseHost));
+    return sorted.first;
+  }
+
+  int _compareAuthCookie(
+    CanonicalCookie a,
+    CanonicalCookie b,
+    String baseHost,
+  ) {
+    final scoreDiff = _authCookieScore(
+      b,
+      baseHost,
+    ).compareTo(_authCookieScore(a, baseHost));
+    if (scoreDiff != 0) return scoreDiff;
+
+    final versionDiff = b.version.compareTo(a.version);
+    if (versionDiff != 0) return versionDiff;
+
+    final aExpires = a.expiresAt;
+    final bExpires = b.expiresAt;
+    if (aExpires != null && bExpires != null && aExpires != bExpires) {
+      return bExpires.compareTo(aExpires);
+    }
+    if (aExpires != null || bExpires != null) {
+      return aExpires == null ? 1 : -1;
+    }
+
+    final createdDiff = b.creationTime.compareTo(a.creationTime);
+    if (createdDiff != 0) return createdDiff;
+
+    return b.value.length.compareTo(a.value.length);
+  }
+
+  int _authCookieScore(CanonicalCookie cookie, String baseHost) {
+    var score = 0;
+    final normalizedDomain = cookie.normalizedDomain;
+    if (normalizedDomain == baseHost) score += 100000;
+    if (cookie.hostOnly) score += 50000;
+    if (cookie.path == '/') score += 25000;
+    if (cookie.secure) score += 5000;
+    if (cookie.httpOnly) score += 5000;
+    return score;
+  }
+
+  CanonicalCookie _normalizeAuthCookie(CanonicalCookie source, Uri baseUri) {
+    final baseHost = baseUri.host.toLowerCase();
+    return CanonicalCookie(
+      name: source.name,
+      value: source.value,
+      domain: baseHost,
+      path: '/',
+      expiresAt: source.expiresAt,
+      maxAge: source.maxAge,
+      secure: source.secure || baseUri.scheme == 'https',
+      httpOnly: source.httpOnly || authCookieNames.contains(source.name),
+      sameSite: source.sameSite,
+      hostOnly: true,
+      persistent: source.persistent,
+      creationTime: source.creationTime,
+      lastAccessTime: source.lastAccessTime,
+      priority: source.priority,
+      sameParty: source.sameParty,
+      sourceScheme: source.sourceScheme,
+      sourcePort: source.sourcePort,
+      partitionKey: source.partitionKey,
+      partitioned: source.partitioned,
+      originUrl: AppConstants.baseUrl,
+      source: source.source,
+      version: source.version,
+      lastSyncedToWebViewAt: source.lastSyncedToWebViewAt,
+      lastSyncedFromWebViewAt: source.lastSyncedFromWebViewAt,
+      rawSetCookie: null,
+    );
+  }
+
+  bool _isCanonicalAuthCookie(
+    CanonicalCookie cookie,
+    CanonicalCookie normalized,
+    String baseHost,
+  ) {
+    return cookie.value == normalized.value &&
+        cookie.hostOnly &&
+        cookie.normalizedDomain == baseHost &&
+        cookie.path == '/' &&
+        cookie.secure == normalized.secure &&
+        cookie.httpOnly == normalized.httpOnly &&
+        cookie.rawSetCookie == null;
   }
 
   // ---------------------------------------------------------------------------
@@ -270,6 +421,16 @@ class CookieJarService {
     );
   }
 
+  /// 加载应用主域下的登录相关 Cookie 诊断信息。
+  Future<List<Map<String, dynamic>>> getAuthCookieDiagnosticsForRequest({
+    Uri? uri,
+  }) {
+    return getCookieDiagnosticsForRequest(
+      uri ?? Uri.parse(AppConstants.baseUrl),
+      names: authCookieNames,
+    );
+  }
+
   /// 加载所有 CanonicalCookie。
   Future<List<CanonicalCookie>> loadAllCanonicalCookies() async {
     if (!_initialized) await initialize();
@@ -290,6 +451,7 @@ class CookieJarService {
     DateTime? expires,
     bool secure = true,
     bool httpOnly = false,
+    bool trusted = false,
   }) async {
     if (!_initialized) await initialize();
 
@@ -310,7 +472,15 @@ class CookieJarService {
         cookie.expires = expires;
       }
 
-      await _cookieJar!.saveFromResponse(uri, [cookie]);
+      final jar = _cookieJar;
+      if (trusted && jar is EnhancedPersistCookieJar) {
+        await jar.saveFromResponseTrusted(uri, [cookie], trusted: true);
+      } else {
+        await _cookieJar!.saveFromResponse(uri, [cookie]);
+      }
+      if (hostOnlyCookieNames.contains(name)) {
+        await enforceAuthCookiePolicy(reason: 'setCookie', names: {name});
+      }
     } catch (e) {
       debugPrint('[CookieJar] Failed to set cookie $name: $e');
     }
@@ -322,34 +492,59 @@ class CookieJarService {
 
     try {
       final uri = Uri.parse(AppConstants.baseUrl);
-      final expired = DateTime.now().subtract(const Duration(days: 1));
-      final hosts = await getKnownHostsForDomain(uri.host);
+      final jar = _cookieJar;
+      if (jar is EnhancedPersistCookieJar) {
+        // 显式删除走 deleteByName，绕过新鲜度仲裁。
+        // 旧实现写"已过期同名 cookie"，会被 isFresherThan 判定为旧值而
+        // 静默跳过，对未过期的持久 cookie（如 cf_clearance）是 no-op。
+        await jar.deleteByName(uri, name);
+      } else {
+        // 内存 jar fallback：写过期 cookie 让 DefaultCookieJar 自行清除
+        final expired = DateTime.now().subtract(const Duration(days: 1));
+        final hosts = await getKnownHostsForDomain(uri.host);
 
-      for (final host in hosts) {
-        final hostUri = Uri.parse('https://$host');
-        final cookies = await _cookieJar!.loadForRequest(hostUri);
+        for (final host in hosts) {
+          final hostUri = Uri.parse('https://$host');
+          final cookies = await _cookieJar!.loadForRequest(hostUri);
 
-        final expiredCookies = <io.Cookie>[];
-        for (final cookie in cookies) {
-          if (cookie.name == name) {
-            final expired0 = io.Cookie(name, '')
-              ..path = cookie.path ?? '/'
-              ..expires = expired;
-            if (cookie.domain != null) {
-              expired0.domain = cookie.domain;
+          final expiredCookies = <io.Cookie>[];
+          for (final cookie in cookies) {
+            if (cookie.name == name) {
+              final expired0 = io.Cookie(name, '')
+                ..path = cookie.path ?? '/'
+                ..expires = expired;
+              if (cookie.domain != null) {
+                expired0.domain = cookie.domain;
+              }
+              expiredCookies.add(expired0);
             }
-            expiredCookies.add(expired0);
           }
-        }
 
-        if (expiredCookies.isNotEmpty) {
-          await _cookieJar!.saveFromResponse(hostUri, expiredCookies);
+          if (expiredCookies.isNotEmpty) {
+            await _cookieJar!.saveFromResponse(hostUri, expiredCookies);
+          }
         }
       }
 
       CookieLogger.delete(name: name, source: 'deleteCookie');
     } catch (e) {
       debugPrint('[CookieJar] Failed to delete cookie $name: $e');
+    }
+  }
+
+  /// 从磁盘重载持久 cookie（保留内存中的 session cookie）。
+  ///
+  /// iOS 后台轮询任务在独立 isolate 写同一 cookie 文件，主 isolate 的
+  /// 内存缓存不会感知；回前台时调用本方法吸收后台写入的新值，避免之后
+  /// 用旧缓存全量覆盖文件、丢掉后台轮换的 token。
+  Future<void> reloadPersistedCookies() async {
+    if (!_initialized) return;
+    final jar = _cookieJar;
+    if (jar is! EnhancedPersistCookieJar) return;
+    try {
+      await jar.reloadPersistedCookies();
+    } catch (e) {
+      debugPrint('[CookieJar] Failed to reload cookies from disk: $e');
     }
   }
 
@@ -366,6 +561,9 @@ class CookieJarService {
 
       // WebView cookie store 清理（平台策略处理差异）
       await _strategy.clearWebViewCookies(webViewCookieManager, knownHosts);
+      for (final name in authCookieNames) {
+        await _deleteWebViewCookieVariants(name, knownHosts);
+      }
 
       CookieLogger.delete(name: '*', source: 'clearAll');
     } catch (e) {
@@ -374,33 +572,40 @@ class CookieJarService {
   }
 
   /// 从 WebView cookie store 删除指定名称的 cookie。
-  /// Windows 上同时尝试 host-only / host / .host 三种变体，避免 WebView2 domain 形态不一致导致残留。
+  /// 同时尝试 host-only / host / .host 三种变体，避免不同 WebView
+  /// cookie store 的 domain 形态不一致导致残留。
   Future<void> deleteWebViewCookie(String name) async {
     if (!_initialized) await initialize();
 
     try {
       final baseHost = Uri.parse(AppConstants.baseUrl).host;
       final hosts = await getKnownHostsForDomain(baseHost);
-
-      for (final host in hosts) {
-        final url = WebUri('https://$host');
-        for (final domain in <String?>{null, host, '.$host'}) {
-          try {
-            await webViewCookieManager.deleteCookie(
-              url: url,
-              name: name,
-              domain: domain,
-              path: '/',
-            );
-          } catch (e) {
-            debugPrint(
-              '[CookieJar] Failed to delete WebView cookie $name for host=$host domain=$domain: $e',
-            );
-          }
-        }
-      }
+      await _deleteWebViewCookieVariants(name, hosts);
     } catch (e) {
       debugPrint('[CookieJar] Failed to delete WebView cookie $name: $e');
+    }
+  }
+
+  Future<void> _deleteWebViewCookieVariants(
+    String name,
+    Set<String> hosts,
+  ) async {
+    for (final host in hosts) {
+      final url = WebUri('https://$host');
+      for (final domain in <String?>{null, host, '.$host'}) {
+        try {
+          await webViewCookieManager.deleteCookie(
+            url: url,
+            name: name,
+            domain: domain,
+            path: '/',
+          );
+        } catch (e) {
+          debugPrint(
+            '[CookieJar] Failed to delete WebView cookie $name for host=$host domain=$domain: $e',
+          );
+        }
+      }
     }
   }
 
@@ -467,17 +672,18 @@ class CookieJarService {
 
   /// 获取所有 Cookie 的字符串形式（用于请求头诊断）
   Future<String?> getCookieHeader() async {
+    return getCookieHeaderForRequest(Uri.parse(AppConstants.baseUrl));
+  }
+
+  /// 获取指定 URI 可见 Cookie 的字符串形式（用于 retry 等手工补 Header）。
+  Future<String?> getCookieHeaderForRequest(Uri uri) async {
     if (!_initialized) await initialize();
 
     try {
-      final uri = Uri.parse(AppConstants.baseUrl);
       final cookies = await _cookieJar!.loadForRequest(uri);
-      if (cookies.isEmpty) return null;
-      return cookies
-          .map((c) => '${c.name}=${CookieValueCodec.decode(c.value)}')
-          .join('; ');
+      return buildCookieHeaderForRequest(cookies, uri);
     } catch (e) {
-      debugPrint('[CookieJar] Failed to get cookie header: $e');
+      debugPrint('[CookieJar] Failed to get cookie header for $uri: $e');
       return null;
     }
   }
@@ -485,6 +691,81 @@ class CookieJarService {
   // ---------------------------------------------------------------------------
   // 工具方法
   // ---------------------------------------------------------------------------
+
+  @visibleForTesting
+  static String? buildCookieHeaderForRequest(List<io.Cookie> cookies, Uri uri) {
+    if (cookies.isEmpty) return null;
+    final header = _selectCookiesForHeader(
+      cookies,
+      uri,
+    ).map((c) => '${c.name}=${CookieValueCodec.decode(c.value)}').join('; ');
+    return header.isEmpty ? null : header;
+  }
+
+  static List<io.Cookie> _selectCookiesForHeader(
+    List<io.Cookie> cookies,
+    Uri uri,
+  ) {
+    final requestHost = uri.host.toLowerCase();
+    final selected = <String, io.Cookie>{};
+    for (final cookie in cookies) {
+      final isHostOnlyAuth = hostOnlyCookieNames.contains(cookie.name);
+      if (isHostOnlyAuth && requestHost != appBaseHost) continue;
+      final key = isHostOnlyAuth
+          ? cookie.name
+          : '${cookie.name}|${cookie.path ?? '/'}';
+      final existing = selected[key];
+      if (existing == null ||
+          _compareHeaderCookiePriority(cookie, existing, requestHost) > 0) {
+        selected[key] = cookie;
+      }
+    }
+    return selected.values.toList()..sort((a, b) {
+      final pathCompare = (b.path?.length ?? 0).compareTo(a.path?.length ?? 0);
+      if (pathCompare != 0) return pathCompare;
+      return _compareHeaderCookiePriority(b, a, requestHost);
+    });
+  }
+
+  static int _compareHeaderCookiePriority(
+    io.Cookie candidate,
+    io.Cookie existing,
+    String requestHost,
+  ) {
+    final scoreDiff =
+        _headerCookiePriorityScore(candidate, requestHost) -
+        _headerCookiePriorityScore(existing, requestHost);
+    if (scoreDiff != 0) return scoreDiff;
+    return candidate.value.length.compareTo(existing.value.length);
+  }
+
+  static int _headerCookiePriorityScore(io.Cookie cookie, String requestHost) {
+    final normalizedDomain = cookie.domain?.trim().toLowerCase().replaceFirst(
+      RegExp(r'^\.'),
+      '',
+    );
+    final isHostOnlyAuth = hostOnlyCookieNames.contains(cookie.name);
+    final isRootPath = cookie.path == null || cookie.path == '/';
+
+    var score = 0;
+    if (normalizedDomain == null || normalizedDomain.isEmpty) {
+      score = 10000;
+    } else if (normalizedDomain == requestHost) {
+      score = 9000 + normalizedDomain.length;
+    } else if (requestHost.endsWith('.$normalizedDomain')) {
+      score = 1000 + normalizedDomain.length;
+    } else {
+      score = normalizedDomain.length;
+    }
+
+    if (isHostOnlyAuth) {
+      if (requestHost == appBaseHost) score += 2000;
+      if (isRootPath) score += 1500;
+      if (cookie.httpOnly) score += 250;
+      if (cookie.secure) score += 250;
+    }
+    return score;
+  }
 
   /// 从 jar 中扫描已知的相关域名
   Future<Set<String>> getKnownHostsForDomain(String baseDomain) async {
@@ -531,12 +812,17 @@ class CookieJarService {
   static bool isCriticalCookie(String name) =>
       criticalCookieNames.contains(name);
 
+  /// 应用主站 host。
+  static String get appBaseHost =>
+      Uri.parse(AppConstants.baseUrl).host.toLowerCase();
+
   /// 检查 domain 是否匹配应用主域
   static bool matchesAppHost(String? domain) {
-    final baseHost = Uri.parse(AppConstants.baseUrl).host;
+    final baseHost = appBaseHost;
     final normalized = domain?.trim().replaceFirst(RegExp(r'^\.'), '');
     if (normalized == null || normalized.isEmpty) return true;
-    return normalized == baseHost || normalized.endsWith('.$baseHost');
+    final lower = normalized.toLowerCase();
+    return lower == baseHost || lower.endsWith('.$baseHost');
   }
 
   /// Windows：通过页面级 controller 的 CDP 读取实时 cookie 值。
@@ -575,6 +861,9 @@ class CookieJarService {
     InAppWebViewController controller, {
     String? currentUrl,
     Set<String>? cookieNames,
+    Set<String>? excludeCookieNames,
+    Map<String, String>? acceptValues,
+    bool trusted = false,
   }) async {
     if (!io.Platform.isWindows) return 0;
     if (!_initialized) await initialize();
@@ -596,6 +885,14 @@ class CookieJarService {
             if (cookieNames != null && !cookieNames.contains(name)) {
               return false;
             }
+            if (excludeCookieNames != null &&
+                excludeCookieNames.contains(name)) {
+              return false;
+            }
+            final onlyValue = acceptValues?[name];
+            if (onlyValue != null && value != onlyValue) {
+              return false;
+            }
             return matchesAppHost(domain);
           })
           .toList(growable: false);
@@ -604,7 +901,18 @@ class CookieJarService {
 
       final jar = _cookieJar;
       if (jar is EnhancedPersistCookieJar) {
-        await jar.saveFromCdpCookies(uri, filtered);
+        await jar.saveFromCdpCookies(uri, filtered, trusted: trusted);
+        final authNames = filtered
+            .map((raw) => raw['name']?.toString())
+            .whereType<String>()
+            .where(hostOnlyCookieNames.contains)
+            .toSet();
+        if (authNames.isNotEmpty) {
+          await enforceAuthCookiePolicy(
+            reason: 'windows_cdp_sync',
+            names: authNames,
+          );
+        }
         return filtered.length;
       }
 
@@ -644,6 +952,16 @@ class CookieJarService {
 
       if (toSave.isEmpty) return 0;
       await _cookieJar!.saveFromResponse(uri, toSave);
+      final authNames = toSave
+          .map((cookie) => cookie.name)
+          .where(hostOnlyCookieNames.contains)
+          .toSet();
+      if (authNames.isNotEmpty) {
+        await enforceAuthCookiePolicy(
+          reason: 'windows_controller_sync',
+          names: authNames,
+        );
+      }
       return toSave.length;
     } catch (e) {
       debugPrint('[CookieJar][Windows] Failed to sync live cookies: $e');

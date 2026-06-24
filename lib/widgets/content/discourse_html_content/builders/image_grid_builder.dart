@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import '../../../../services/discourse_cache_manager.dart';
 import '../../../../utils/url_helper.dart';
@@ -224,14 +225,10 @@ class _GridImageTileState extends State<_GridImageTile> {
       return _buildImageWidget(context, widget.imageData.src, widget.imageData.fullSrc, displayHeight);
     }
 
-    // upload:// 短链接：检查缓存
-    if (DiscourseImageUtils.isUploadUrlCached(widget.imageData.src)) {
-      final resolvedUrl = DiscourseImageUtils.getCachedUploadUrl(widget.imageData.src);
-      if (resolvedUrl != null) {
-        return _buildImageWidget(context, resolvedUrl, resolvedUrl, displayHeight);
-      }
-      // 解析失败
-      return _buildErrorWidget(displayHeight);
+    // upload:// 短链接：命中缓存直接渲染（缓存仅含成功结果）
+    final cachedUrl = DiscourseImageUtils.getCachedUploadUrl(widget.imageData.src);
+    if (cachedUrl != null) {
+      return _buildImageWidget(context, cachedUrl, cachedUrl, displayHeight);
     }
 
     // 首次加载：使用 FutureBuilder 解析
@@ -293,7 +290,7 @@ class _GridImageTileState extends State<_GridImageTile> {
                 return Container(
                   color: widget.theme.colorScheme.surfaceContainerHighest,
                   child: Icon(
-                    Icons.broken_image,
+                    Symbols.broken_image_rounded,
                     color: widget.theme.colorScheme.outline,
                   ),
                 );
@@ -357,7 +354,7 @@ class _GridImageTileState extends State<_GridImageTile> {
         child: Container(
           color: widget.theme.colorScheme.surfaceContainerHighest,
           child: Icon(
-            Icons.broken_image,
+            Symbols.broken_image_rounded,
             color: widget.theme.colorScheme.outline,
           ),
         ),

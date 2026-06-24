@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:html/parser.dart' as html_parser;
 
+import '../widgets/common/error_view.dart';
 import '../widgets/common/trust_level_skeleton.dart';
 import '../services/network/discourse_dio.dart';
 import '../l10n/s.dart';
@@ -17,7 +19,8 @@ class TrustLevelRequirementsPage extends StatefulWidget {
 class _TrustLevelRequirementsPageState
     extends State<TrustLevelRequirementsPage> {
   bool _isLoading = true;
-  String? _error;
+  Object? _error;
+  StackTrace? _errorStack;
   TrustLevelData? _data;
 
 
@@ -32,9 +35,8 @@ class _TrustLevelRequirementsPageState
     setState(() {
       _isLoading = true;
       _error = null;
+      _errorStack = null;
     });
-
-
 
     try {
       final dio = DiscourseDio.create();
@@ -44,13 +46,16 @@ class _TrustLevelRequirementsPageState
         _parseHtml(response.data);
       } else {
         setState(() {
-          _error = S.current.trustLevel_requestFailed(response.statusCode ?? 0);
+          _error = Exception(
+            S.current.trustLevel_requestFailed(response.statusCode ?? 0),
+          );
           _isLoading = false;
         });
       }
-    } catch (e) {
+    } catch (e, s) {
       setState(() {
-        _error = '${S.current.common_loadFailed}: $e';
+        _error = e;
+        _errorStack = s;
         _isLoading = false;
       });
     }
@@ -190,9 +195,10 @@ class _TrustLevelRequirementsPageState
         );
         _isLoading = false;
       });
-    } catch (e) {
+    } catch (e, s) {
       setState(() {
-        _error = S.current.trustLevel_parseFailed(e.toString());
+        _error = e;
+        _errorStack = s;
         _isLoading = false;
       });
     }
@@ -305,7 +311,7 @@ class _TrustLevelRequirementsPageState
                 right: -20,
                 top: -20,
                 child: Icon(
-                  Icons.verified_user_outlined,
+                  Symbols.verified_user_rounded,
                   size: 200,
                   color: colorScheme.primary.withValues(alpha: 0.05),
                 ),
@@ -708,7 +714,7 @@ class _TrustLevelRequirementsPageState
                    shape: BoxShape.circle,
                  ),
                  child: Icon(
-                   veto.isMet ? Icons.check : Icons.close, 
+                   veto.isMet ? Symbols.check_rounded : Symbols.close_rounded, 
                    size: 16,
                    color: iconColor,
                  ),
@@ -773,7 +779,7 @@ class _TrustLevelRequirementsPageState
                  mainAxisAlignment: MainAxisAlignment.center,
                  children: [
                     Icon(
-                      _data!.isStatusMet ? Icons.check_circle_outline : Icons.cancel_outlined,
+                      _data!.isStatusMet ? Symbols.check_circle_rounded : Symbols.cancel_rounded,
                       color: statusColor,
                       size: 20,
                     ),
@@ -799,20 +805,10 @@ class _TrustLevelRequirementsPageState
   }
 
   Widget _buildError(ThemeData theme) {
-     return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.error_outline, size: 48, color: theme.colorScheme.error),
-            const SizedBox(height: 16),
-            Text(_error ?? context.l10n.error_unknown),
-            const SizedBox(height: 16),
-            FilledButton(onPressed: _fetchData, child: Text(context.l10n.common_retry)),
-          ],
-        ),
-      ),
+    return ErrorView(
+      error: _error!,
+      stackTrace: _errorStack,
+      onRetry: _fetchData,
     );
   }
 }

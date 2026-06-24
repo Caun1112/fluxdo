@@ -92,7 +92,9 @@ class CfChallengeInterceptor extends Interceptor {
     options.headers.remove('cookie');
     options.headers.remove('Cookie');
 
-    final cookieHeader = await cookieJarService.getCookieHeader();
+    final cookieHeader = await cookieJarService.getCookieHeaderForRequest(
+      options.uri,
+    );
     if (cookieHeader != null && cookieHeader.isNotEmpty) {
       options.headers['Cookie'] = cookieHeader;
     }
@@ -108,7 +110,10 @@ class CfChallengeInterceptor extends Interceptor {
     // 检查是否标记跳过 CF 验证（防止重试后再次触发）
     final skipCfChallenge = err.requestOptions.extra['skipCfChallenge'] == true;
 
-    if (statusCode == 403 &&
+    // CF 速率限制规则的 action 配为 managed_challenge / js_challenge / challenge 时,
+    // 触发后返回 429 + cf-mitigated: challenge + 挑战页,而不是 403。
+    // 因此 403 / 429 都要走 CF 验证流程,由 isCfChallengeResponse 精确判定。
+    if ((statusCode == 403 || statusCode == 429) &&
         !skipCfChallenge &&
         CfChallengeService.isCfChallengeResponse(err.response)) {
       // 备选提取 sitekey（从 403 响应体中）
@@ -202,6 +207,9 @@ class CfChallengeInterceptor extends Interceptor {
         final retryOptions = err.requestOptions;
         try {
           retryOptions.extra['skipCfChallenge'] = true;
+          // 绕过 RequestScheduler 的 CF 冻结判定。retry 时序上 isVerifying 已经
+          // 复位为 false，但加这个标记是双保险，防止未来逻辑变更引入 race。
+          retryOptions.extra['skipCfBlock'] = true;
           // 清除原始请求中残留的 cookie header，并补上最新 Cookie。
           // 这样即使 dio.fetch 不重新经过 CookieManager，也不会继续发送旧值。
           await _refreshCookieHeader(retryOptions);
@@ -225,6 +233,9 @@ class CfChallengeInterceptor extends Interceptor {
             success: true,
             statusCode: response.statusCode,
           );
+          // 广播:Dio 侧重试成功 = 新 cf_clearance 已生效。供 BrowserTrustCoordinator
+          // 感知"CF 已解决",从而 force 重跑因同一 CF 失败的 WebView session bootstrap。
+          cfService.clearanceResolvedAt.value = DateTime.now();
           return handler.resolve(response);
         } catch (e) {
           // 诊断：记录完整的重试失败信息
@@ -233,9 +244,10 @@ class CfChallengeInterceptor extends Interceptor {
               '[Dio] Retry failed: status=${e.response?.statusCode}, '
               'type=${e.type}, url=${e.requestOptions.uri}',
             );
-            if (e.response?.statusCode == 403) {
+            if (e.response?.statusCode == 403 ||
+                e.response?.statusCode == 429) {
               debugPrint(
-                '[Dio] Retry got 403 again — cf_clearance may not have been sent or already expired',
+                '[Dio] Retry got ${e.response?.statusCode} again — cf_clearance may not have been sent or already expired',
               );
             }
           } else {

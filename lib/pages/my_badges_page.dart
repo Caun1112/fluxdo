@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import '../models/badge.dart';
@@ -6,6 +7,7 @@ import '../providers/discourse_providers.dart';
 import '../services/discourse_cache_manager.dart';
 import '../utils/url_helper.dart';
 import '../widgets/badge/my_badges_skeleton.dart';
+import '../widgets/common/error_view.dart';
 import '../utils/font_awesome_helper.dart';
 import '../widgets/badge/badge_ui_utils.dart';
 import 'badge_page.dart';
@@ -22,7 +24,8 @@ class MyBadgesPage extends ConsumerStatefulWidget {
 class _MyBadgesPageState extends ConsumerState<MyBadgesPage> {
   Map<BadgeType, List<UserBadge>>? _groupedBadges;
   bool _isLoading = true;
-  String? _error;
+  Object? _error;
+  StackTrace? _errorStack;
 
   @override
   void initState() {
@@ -34,13 +37,14 @@ class _MyBadgesPageState extends ConsumerState<MyBadgesPage> {
     setState(() {
       _isLoading = true;
       _error = null;
+      _errorStack = null;
     });
 
     try {
       final user = ref.read(currentUserProvider).value;
       if (user == null) {
         setState(() {
-          _error = S.current.error_unauthorizedExpired;
+          _error = Exception(S.current.error_unauthorizedExpired);
           _isLoading = false;
         });
         return;
@@ -65,10 +69,11 @@ class _MyBadgesPageState extends ConsumerState<MyBadgesPage> {
           _isLoading = false;
         });
       }
-    } catch (e) {
+    } catch (e, s) {
       if (mounted) {
         setState(() {
-          _error = e.toString();
+          _error = e;
+          _errorStack = s;
           _isLoading = false;
         });
       }
@@ -89,22 +94,10 @@ class _MyBadgesPageState extends ConsumerState<MyBadgesPage> {
       body: _isLoading
           ? const MyBadgesSkeleton()
           : _error != null
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.error_outline,
-                          size: 64, color: Colors.grey),
-                      const SizedBox(height: 16),
-                      Text('${context.l10n.common_loadFailed}: $_error',
-                          style: const TextStyle(color: Colors.grey)),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: _loadBadges,
-                        child: Text(context.l10n.common_retry),
-                      ),
-                    ],
-                  ),
+              ? ErrorView(
+                  error: _error!,
+                  stackTrace: _errorStack,
+                  onRetry: _loadBadges,
                 )
               : RefreshIndicator(
                   onRefresh: _loadBadges,
@@ -117,7 +110,7 @@ class _MyBadgesPageState extends ConsumerState<MyBadgesPage> {
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                Icon(Icons.military_tech_outlined,
+                                Icon(Symbols.military_tech_rounded,
                                     size: 64, color: Colors.grey[400]),
                                 const SizedBox(height: 16),
                                 Text(context.l10n.myBadges_empty,

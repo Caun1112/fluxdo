@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:fluxdo/widgets/common/error_view.dart';
 import 'package:fluxdo/widgets/common/loading_spinner.dart';
 import 'package:fluxdo/widgets/markdown_editor/markdown_editor.dart';
 import 'package:fluxdo/models/category.dart';
@@ -58,6 +60,7 @@ class _CreateTopicPageState extends ConsumerState<CreateTopicPage> {
   List<String> _selectedTags = [];
   bool _isSubmitting = false;
   bool _submitted = false; // 提交成功标志，防止 dispose 重新保存草稿
+  bool _discarded = false; // 用户明确舍弃，防止 dispose 重新保存草稿
   bool _showPreview = false;
   String? _templateContent;
   bool _isLoadingDraft = false;
@@ -224,6 +227,7 @@ class _CreateTopicPageState extends ConsumerState<CreateTopicPage> {
     );
 
     if (confirm == true && mounted) {
+      _discarded = true;
       await _draftController.deleteDraft();
       if (mounted) Navigator.of(context).pop();
     }
@@ -268,7 +272,7 @@ class _CreateTopicPageState extends ConsumerState<CreateTopicPage> {
     _contentController.removeListener(_onDraftContentChanged);
 
     // 关闭时处理草稿：已提交则跳过，有内容则保存，无内容则删除
-    if (!_submitted) {
+    if (!_submitted && !_discarded) {
       if (_titleController.text.trim().isNotEmpty ||
           _contentController.text.trim().isNotEmpty) {
         final data = DraftData(
@@ -456,13 +460,13 @@ class _CreateTopicPageState extends ConsumerState<CreateTopicPage> {
         );
       case DraftSaveStatus.saved:
         return Icon(
-          Icons.cloud_done_outlined,
+          Symbols.cloud_done_rounded,
           size: 18,
           color: theme.colorScheme.outline,
         );
       case DraftSaveStatus.error:
         return Icon(
-          Icons.cloud_off_outlined,
+          Symbols.cloud_off_rounded,
           size: 18,
           color: theme.colorScheme.error,
         );
@@ -778,7 +782,7 @@ class _CreateTopicPageState extends ConsumerState<CreateTopicPage> {
                     child: FloatingActionButton.small(
                       onPressed: _togglePreview,
                       tooltip: context.l10n.common_exitPreview,
-                      child: const Icon(Icons.edit_outlined),
+                      child: const Icon(Symbols.edit_rounded),
                     ),
                   ),
                 // 草稿加载遮罩
@@ -793,10 +797,10 @@ class _CreateTopicPageState extends ConsumerState<CreateTopicPage> {
             );
           },
           loading: () => const Center(child: LoadingSpinner()),
-          error: (err, stack) => Center(
-            child: Text(
-              context.l10n.createTopic_loadCategoryFailed(err.toString()),
-            ),
+          error: (err, stack) => ErrorView(
+            error: err,
+            stackTrace: stack,
+            onRetry: () => ref.invalidate(categoriesProvider),
           ),
         ),
       ),

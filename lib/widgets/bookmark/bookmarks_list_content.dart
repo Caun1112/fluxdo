@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../l10n/s.dart';
@@ -9,6 +10,7 @@ import '../../utils/platform_utils.dart';
 import '../../utils/time_utils.dart';
 import 'bookmark_preview_quick_editor.dart';
 import '../common/error_view.dart';
+import '../common/paged_list_footer.dart';
 import '../desktop_refresh_indicator.dart';
 import '../topic/topic_list_skeleton.dart';
 import '../topic/topic_item_builder.dart';
@@ -77,7 +79,7 @@ class BookmarksListContent extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.bookmark_border, size: 64, color: Colors.grey),
+            const Icon(Symbols.bookmark_rounded, size: 64, color: Colors.grey),
             const SizedBox(height: 16),
             Text(
               context.l10n.bookmarks_empty,
@@ -153,9 +155,7 @@ class BookmarksListContent extends StatelessWidget {
     return Column(
       children: [
         DecoratedBox(
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surface,
-          ),
+          decoration: BoxDecoration(color: theme.colorScheme.surface),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
             child: _BookmarkSummaryBar(
@@ -171,52 +171,12 @@ class BookmarksListContent extends StatelessWidget {
   }
 
   Widget _buildFooter(BuildContext context) {
-    if (isLoadingMore) {
-      return const Padding(
-        padding: EdgeInsets.all(16.0),
-        child: Center(child: CircularProgressIndicator()),
-      );
-    }
-    if (!hasMore) {
-      return Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Center(
-          child: Text(
-            context.l10n.common_noMore,
-            style: const TextStyle(color: Colors.grey),
-          ),
-        ),
-      );
-    }
-    if (isLoadMoreFailed) {
-      return Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Center(
-          child: GestureDetector(
-            onTap: onRetryLoadMore,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.refresh,
-                  size: 16,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  context.l10n.common_loadFailedTapRetry,
-                  style: TextStyle(
-                    fontSize: 14,
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-    return const SizedBox.shrink();
+    return PagedListFooter(
+      hasMore: hasMore,
+      isLoadingMore: isLoadingMore,
+      isLoadMoreFailed: isLoadMoreFailed,
+      onRetry: onRetryLoadMore,
+    );
   }
 
   List<PreviewAction> _buildPreviewActions(BuildContext context, Topic topic) {
@@ -228,18 +188,18 @@ class BookmarksListContent extends StatelessWidget {
 
     return [
       PreviewAction(
-        icon: Icons.edit_outlined,
+        icon: Symbols.edit_rounded,
         label: context.l10n.bookmark_editBookmark,
         onTap: () => onEditBookmark(topic),
       ),
       if (topic.bookmarkReminderAt != null)
         PreviewAction(
-          icon: Icons.alarm_off,
+          icon: Symbols.alarm_off_rounded,
           label: context.l10n.bookmarks_cancelReminder,
           onTap: () => onClearReminder(topic),
         ),
       PreviewAction(
-        icon: Icons.delete_outline,
+        icon: Symbols.delete_rounded,
         label: context.l10n.common_deleteBookmark,
         color: theme.colorScheme.error,
         onTap: () => onDeleteBookmark(topic),
@@ -276,7 +236,7 @@ class BookmarksListContent extends StatelessWidget {
               WidgetSpan(
                 alignment: PlaceholderAlignment.middle,
                 child: Icon(
-                  Icons.bookmark_outlined,
+                  Symbols.bookmark_rounded,
                   size: 13,
                   color: foregroundColor,
                 ),
@@ -293,7 +253,7 @@ class BookmarksListContent extends StatelessWidget {
                 ),
               WidgetSpan(
                 alignment: PlaceholderAlignment.middle,
-                child: Icon(Icons.alarm, size: 13, color: foregroundColor),
+                child: Icon(Symbols.alarm_rounded, size: 13, color: foregroundColor),
               ),
               TextSpan(
                 text: isExpired
@@ -488,7 +448,8 @@ class _BookmarkFilterSwipeRegion extends StatefulWidget {
       _BookmarkFilterSwipeRegionState();
 }
 
-class _BookmarkFilterSwipeRegionState extends State<_BookmarkFilterSwipeRegion> {
+class _BookmarkFilterSwipeRegionState
+    extends State<_BookmarkFilterSwipeRegion> {
   static const String _allSummaryKey = '__bookmark_summary_all__';
   static const double _swipeDistanceThreshold = 72;
   static const double _swipeVelocityThreshold = 320;

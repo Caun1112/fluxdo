@@ -1,5 +1,6 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:ai_model_manager/ai_model_manager.dart';
@@ -188,8 +189,9 @@ class _CacheManagementSectionState
 
   /// 清除 Cookie，并同步执行退出登录链路的状态销毁。
   Future<void> _doClearCookies() async {
+    final container = ProviderScope.containerOf(context, listen: false);
     await ref.read(discourseServiceProvider).logout(callApi: false);
-    await AppStateRefresher.resetForLogout(ref);
+    await AppStateRefresher.resetForLogout(container);
   }
 
   Future<bool?> _showConfirmDialog({
@@ -229,7 +231,7 @@ class _CacheManagementSectionState
       children: [
         _buildCacheTile(
           theme: theme,
-          icon: Icons.image_rounded,
+          icon: Symbols.image_rounded,
           title: context.l10n.dataManagement_imageCache,
           size: _imageCacheSize,
           onClear: _isClearing ? null : _clearImageCache,
@@ -237,7 +239,7 @@ class _CacheManagementSectionState
         _buildDivider(theme),
         _buildCacheTile(
           theme: theme,
-          icon: Icons.smart_toy_rounded,
+          icon: Symbols.smart_toy_rounded,
           title: context.l10n.dataManagement_aiChatData,
           size: _aiChatDataSize,
           onClear: _isClearing ? null : _clearAiChatData,
@@ -245,7 +247,7 @@ class _CacheManagementSectionState
         _buildDivider(theme),
         _buildCacheTile(
           theme: theme,
-          icon: Icons.cookie_rounded,
+          icon: Symbols.cookie_rounded,
           title: context.l10n.dataManagement_cookieCache,
           size: _cookieCacheSize,
           onClear: _isClearing ? null : _clearCookieCache,
@@ -253,7 +255,7 @@ class _CacheManagementSectionState
         _buildDivider(theme),
         ListTile(
           leading: Icon(
-            Icons.delete_sweep_rounded,
+            Symbols.delete_sweep_rounded,
             color: theme.colorScheme.error,
           ),
           title: Text(context.l10n.dataManagement_clearAllCache),
@@ -383,11 +385,11 @@ class DataBackupSection extends ConsumerWidget {
     return Column(
       children: [
         ListTile(
-          leading: const Icon(Icons.upload_rounded),
+          leading: const Icon(Symbols.upload_rounded),
           title: Text(context.l10n.dataManagement_exportData),
           subtitle: Text(context.l10n.dataManagement_exportDesc),
           trailing: Icon(
-            Icons.chevron_right_rounded,
+            Symbols.chevron_right_rounded,
             color: theme.colorScheme.outline.withValues(alpha: 0.4),
             size: 20,
           ),
@@ -399,11 +401,11 @@ class DataBackupSection extends ConsumerWidget {
           color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3),
         ),
         ListTile(
-          leading: const Icon(Icons.download_rounded),
+          leading: const Icon(Symbols.download_rounded),
           title: Text(context.l10n.dataManagement_importData),
           subtitle: Text(context.l10n.dataManagement_importDesc),
           trailing: Icon(
-            Icons.chevron_right_rounded,
+            Symbols.chevron_right_rounded,
             color: theme.colorScheme.outline.withValues(alpha: 0.4),
             size: 20,
           ),

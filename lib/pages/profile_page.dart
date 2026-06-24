@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/user.dart';
@@ -64,6 +65,11 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
   bool _showTitle = false;
   bool _isRefreshing = false;
 
+  // 余额卡片(CDK/LDC)是否已可渲染:仅在本页首次成为活跃 tab 后置 true。
+  // 避免 IndexedStack 冷启动预构建本页时,balance card 的 watch 就触发
+  // cdk/ldc user-info 请求(撞上 cdk 子域冷启动的 CF 挑战窗口)。
+  bool _balanceEverActive = false;
+
   // 统计卡片引导
   static const String _guideKey = 'profile_stats_card_guide_shown';
   final GlobalKey _statsCardKey = GlobalKey();
@@ -75,29 +81,41 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
     _scrollController = ScrollController();
     _scrollController.addListener(_onScroll);
     _rightScrollController = ScrollController();
+    // 启动即为活跃 tab(如默认进入本页)时允许立即渲染;否则等首次切入。
+    _balanceEverActive = widget.isActive;
   }
 
   @override
   void didUpdateWidget(ProfilePage oldWidget) {
     super.didUpdateWidget(oldWidget);
     // tab 切换时 isActive 变化
-    if (widget.isActive && !oldWidget.isActive && !_guideShown) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _tryShowStatsGuide();
-      });
+    if (widget.isActive && !oldWidget.isActive) {
+      // 首次切入本页才渲染余额卡片(触发 cdk/ldc 请求),避免冷启动预构建即请求。
+      // didUpdateWidget 后 framework 会自动 rebuild,无需 setState。
+      _balanceEverActive = true;
+      if (!_guideShown) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _tryShowStatsGuide();
+        });
+      }
     }
   }
 
   /// 下拉刷新
-  /// 注意：LDC/CDK provider 的 build() 中 ref.watch(currentUserProvider) 会在
-  /// currentUser 刷新后自动重建，无需显式调用 refresh()，否则会触发两次 loading
   Future<void> _refreshData() async {
     if (!mounted) return;
     setState(() => _isRefreshing = true);
     try {
+      // LDC/CDK provider 现在只 watch currentUser.username，
+      // refreshSilently 不会再连带触发它们 rebuild，需要显式刷新
+      final prefs = ref.read(sharedPreferencesProvider);
+      final ldcEnabled = prefs.getBool('ldc_enabled') ?? false;
+      final cdkEnabled = prefs.getBool('cdk_enabled') ?? false;
       await Future.wait([
         ref.read(currentUserProvider.notifier).refreshSilently(force: true),
         ref.read(userSummaryProvider.notifier).refresh(),
+        if (ldcEnabled) ref.read(ldcUserInfoProvider.notifier).refresh(),
+        if (cdkEnabled) ref.read(cdkUserInfoProvider.notifier).refresh(),
       ]);
     } finally {
       if (mounted) setState(() => _isRefreshing = false);
@@ -173,21 +191,29 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
       MaterialPageRoute(builder: (_) => const LoginPage()),
     );
     if (result == true && mounted) {
-      LoadingDialog.show(context, message: context.l10n.profile_loadingData);
-
-      AppStateRefresher.refreshAll(ref);
-
+      final loading = LoadingDialog.show(
+        context,
+        message: context.l10n.profile_loadingData,
+      );
       try {
+        // 等加载弹框首帧结束后再刷新 provider，避免登录路由恢复时和
+        // Overlay/TickerMode 的构建时机相撞。
+        await WidgetsBinding.instance.endOfFrame;
+        if (!mounted) return;
+
+        AppStateRefresher.refreshAll(
+          ProviderScope.containerOf(context, listen: false),
+        );
+
         await Future.wait([
           ref.read(currentUserProvider.future),
           ref.read(userSummaryProvider.future),
         ]).timeout(const Duration(seconds: 10));
-      } catch (_) {
+      } catch (e) {
+        debugPrint('[ProfilePage] 登录后刷新失败/超时: $e');
         // 超时或错误时继续
-      }
-
-      if (mounted) {
-        LoadingDialog.hide(context);
+      } finally {
+        loading.hide();
       }
     }
   }
@@ -219,7 +245,9 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
 
       await ref.read(discourseServiceProvider).logout(callApi: true);
       if (mounted) {
-        await AppStateRefresher.resetForLogout(ref);
+        await AppStateRefresher.resetForLogout(
+          ProviderScope.containerOf(context, listen: false),
+        );
       }
 
       if (mounted) {
@@ -383,12 +411,12 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
                         key: const ValueKey('offline'),
                         width: 48,
                         height: 48,
-                        child: Icon(Icons.cloud_off_rounded, color: theme.colorScheme.outline),
+                        child: Icon(Symbols.cloud_off_rounded, color: theme.colorScheme.outline),
                       )
                     : const SizedBox(key: ValueKey('idle'), width: 0),
           ),
           IconButton(
-            icon: const Icon(Icons.manage_accounts_rounded),
+            icon: const Icon(Symbols.manage_accounts_rounded),
             tooltip: context.l10n.profile_editProfile,
             onPressed: _openProfileEdit,
           ),
@@ -547,6 +575,9 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
 
   /// LDC/CDK 余额卡片（共用组件）
   Widget _buildBalanceCards() {
+    // 仅本页首次成为活跃 tab 后才渲染余额卡片;未激活时返回空,不建 Consumer、
+    // 不 watch provider,从而不触发 cdk/ldc user-info 请求。
+    if (!_balanceEverActive) return const SizedBox.shrink();
     return Consumer(
       builder: (context, ref, _) {
         final prefs = ref.watch(sharedPreferencesProvider);
@@ -595,7 +626,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
         padding: const EdgeInsets.all(16),
         child: Row(
           children: [
-            Icon(Icons.error_outline, color: theme.colorScheme.error),
+            Icon(Symbols.error_rounded, color: theme.colorScheme.error),
             const SizedBox(width: 12),
             Expanded(child: Text('${context.l10n.common_loadFailed}: $error', style: theme.textTheme.bodySmall)),
             TextButton(
@@ -627,7 +658,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
   Widget _buildContentCard(ThemeData theme) {
     final actions = [
       (
-        icon: Icons.article_rounded,
+        icon: Symbols.article_rounded,
         iconColor: Colors.blue,
         title: context.l10n.profile_myTopics,
         onTap: () => Navigator.push(
@@ -636,7 +667,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
         ),
       ),
       (
-        icon: Icons.bookmark_rounded,
+        icon: Symbols.bookmark_rounded,
         iconColor: Colors.orange,
         title: context.l10n.profile_myBookmarks,
         onTap: () => Navigator.push(
@@ -645,7 +676,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
         ),
       ),
       (
-        icon: Icons.drafts_rounded,
+        icon: Symbols.drafts_rounded,
         iconColor: Colors.teal,
         title: context.l10n.profile_myDrafts,
         onTap: () => Navigator.push(
@@ -654,7 +685,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
         ),
       ),
       (
-        icon: Icons.history_rounded,
+        icon: Symbols.history_rounded,
         iconColor: Colors.purple,
         title: context.l10n.profile_browsingHistory,
         onTap: () => Navigator.push(
@@ -751,26 +782,26 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
       child: Column(
         children: [
           _buildOptionTile(
-            icon: Icons.mail_rounded,
+            icon: Symbols.mail_rounded,
             iconColor: Colors.indigo,
             title: context.l10n.profile_privateMessages,
             onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PrivateMessagesPage())),
           ),
           _buildOptionTile(
-            icon: Icons.military_tech_rounded,
+            icon: Symbols.military_tech_rounded,
             iconColor: Colors.amber[700]!,
             title: context.l10n.profile_myBadges,
             onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MyBadgesPage()))
           ),
           _buildOptionTile(
-            icon: Icons.verified_user_rounded, 
+            icon: Symbols.verified_user_rounded, 
             iconColor: Colors.green,
             title: context.l10n.profile_trustRequirements,
             onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const TrustLevelRequirementsPage()))
           ),
           if (canAccessInviteLinks)
             _buildOptionTile(
-              icon: Icons.link_rounded,
+              icon: Symbols.link_rounded,
               iconColor: Colors.cyan,
               title: context.l10n.profile_inviteLinks,
               onTap: () => Navigator.push(
@@ -779,7 +810,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
               ),
             ),
           _buildOptionTile(
-            icon: Icons.history_edu_rounded,
+            icon: Symbols.history_edu_rounded,
             iconColor: Colors.pink,
             title: context.l10n.exportHistory_title,
             onTap: () => Navigator.push(
@@ -788,7 +819,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
             ),
           ),
           _buildOptionTile(
-            icon: Icons.explore_rounded,
+            icon: Symbols.explore_rounded,
             iconColor: Colors.deepOrange,
             title: context.l10n.profile_metaverse,
             showDivider: false,
@@ -808,13 +839,13 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
       child: Column(
         children: [
           _buildOptionTile(
-            icon: Icons.language_rounded,
+            icon: Symbols.language_rounded,
             iconColor: Colors.blue,
             title: context.l10n.profile_myBrowser,
             onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const MyBrowserPage()))
           ),
           _buildOptionTile(
-            icon: Icons.smart_toy_rounded,
+            icon: Symbols.smart_toy_rounded,
             iconColor: Colors.cyan,
             title: context.l10n.profile_aiModelService,
             onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => AiProvidersPage(
@@ -830,7 +861,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
             ))),
           ),
           _buildOptionTile(
-            icon: Icons.settings_rounded,
+            icon: Symbols.settings_rounded,
             iconColor: Colors.blueGrey,
             title: context.l10n.profile_settings,
             showDivider: false,
@@ -881,7 +912,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
                     )
                   ),
                   Icon(
-                    Icons.chevron_right_rounded, 
+                    Symbols.chevron_right_rounded, 
                     color: theme.colorScheme.outline.withValues(alpha:0.4), 
                     size: 20
                   ),
@@ -908,7 +939,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
       return Center(
         child: TextButton.icon(
           onPressed: _logout,
-          icon: Icon(Icons.logout_rounded, size: 18, color: theme.colorScheme.error.withValues(alpha:0.8)),
+          icon: Icon(Symbols.logout_rounded, size: 18, color: theme.colorScheme.error.withValues(alpha:0.8)),
           label: Text(context.l10n.profile_logoutCurrentAccount, style: TextStyle(color: theme.colorScheme.error.withValues(alpha:0.8), fontWeight: FontWeight.w500)),
           style: TextButton.styleFrom(
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
@@ -922,7 +953,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
         padding: const EdgeInsets.symmetric(horizontal: 16),
         child: FilledButton.icon(
           onPressed: _goToLogin,
-          icon: const Icon(Icons.login_rounded, size: 20),
+          icon: const Icon(Symbols.login_rounded, size: 20),
           label: Text(context.l10n.profile_loginLinuxDo, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16)),
           style: FilledButton.styleFrom(
             minimumSize: const Size(double.infinity, 52),
@@ -966,7 +997,7 @@ class _ProfileHeader extends ConsumerWidget {
                 radius: 16,
                 backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
                 child: Icon(
-                  Icons.arrow_forward_ios_rounded,
+                  Symbols.arrow_forward_ios_rounded,
                   size: 14,
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),

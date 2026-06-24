@@ -16,12 +16,13 @@ import '../../utils/platform_utils.dart';
 import '../mention/mention_autocomplete.dart';
 import 'emoji_sticker_panel.dart';
 import 'markdown_renderer.dart';
+import 'markdown_tool_panel.dart';
 import 'markdown_toolbar.dart';
 import 'package:pangutext/pangutext.dart';
 import '../../../../../l10n/s.dart';
 
 /// 编辑器面板类型
-enum EditorPanelType { none, keyboard, emoji }
+enum EditorPanelType { none, keyboard, emoji, tools }
 
 /// 通用 Markdown 编辑器组件
 /// 包含编辑/预览模式切换、工具栏和表情面板
@@ -44,7 +45,7 @@ class MarkdownEditor extends ConsumerStatefulWidget {
   /// 表情面板高度
   final double emojiPanelHeight;
 
-  /// 表情面板状态变化回调
+  /// 自定义面板（表情/工具）开关状态变化回调
   final ValueChanged<bool>? onEmojiPanelChanged;
 
   /// 用户提及数据源（可选，不传则不启用 @用户 功能）
@@ -97,8 +98,20 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
   final _panelController = ChatBottomPanelContainerController<EditorPanelType>();
   EditorPanelType _currentPanelType = EditorPanelType.none;
   bool _readOnly = false;
-  // 表情面板意图状态：用于防止焦点变化导致的面板状态竞争
-  bool _emojiPanelIntended = false;
+  // 面板意图状态：用户希望打开的自定义面板（表情/工具），
+  // 用于防止焦点变化导致的面板状态竞争
+  EditorPanelType _intendedPanel = EditorPanelType.none;
+
+  /// EmojiStickerPanel 实例缓存。
+  ///
+  /// ChatBottomPanelContainer 每次 build 都会回调 otherPanelWidget 重新生成
+  /// 面板 widget;如果每次都 new 一个 EmojiStickerPanel,编辑器任何 setState
+  /// (键盘动画、草稿状态、预览切换…)都会级联重建整个 emoji grid ——
+  /// viewport + cacheExtent 内几百个 cell 一帧内全部 rebuild,面板必卡。
+  /// 缓存同一实例后,Element.updateChild 看到 identical widget 直接跳过
+  /// 整棵子树。回调闭包只捕获 state 成员(_focusNode/_toolbarKey),
+  /// 生命周期内稳定,缓存安全。
+  Widget? _emojiPanelChild;
 
   @override
   void initState() {
@@ -269,10 +282,12 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
     }
   }
 
-  /// 关闭表情面板（供外部调用）
+  /// 关闭表情/工具面板（供外部调用，如返回键拦截）
   void closeEmojiPanel() {
-    if (_emojiPanelIntended || _currentPanelType == EditorPanelType.emoji) {
-      _emojiPanelIntended = false;
+    if (_intendedPanel != EditorPanelType.none ||
+        _currentPanelType == EditorPanelType.emoji ||
+        _currentPanelType == EditorPanelType.tools) {
+      _intendedPanel = EditorPanelType.none;
       if (!_isDesktop) _updateReadOnly(false);
       _panelController.updatePanelType(
         ChatBottomPanelType.none,
@@ -284,11 +299,11 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
   /// 桌面端没有软键盘
   static final bool _isDesktop = PlatformUtils.isDesktop;
 
-  /// 切换表情面板
-  void _toggleEmojiPanel() {
-    if (_emojiPanelIntended) {
-      // 关闭表情面板
-      _emojiPanelIntended = false;
+  /// 切换自定义面板（表情/工具）
+  void _togglePanel(EditorPanelType type) {
+    if (_intendedPanel == type) {
+      // 关闭面板
+      _intendedPanel = EditorPanelType.none;
       if (_isDesktop) {
         _panelController.updatePanelType(
           ChatBottomPanelType.none,
@@ -300,8 +315,8 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
         _panelController.updatePanelType(ChatBottomPanelType.keyboard);
       }
     } else {
-      // 打开表情面板
-      _emojiPanelIntended = true;
+      // 打开（或从另一个面板切换到）目标面板
+      _intendedPanel = type;
       if (!_isDesktop) {
         _updateReadOnly(true);
       }
@@ -309,10 +324,17 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
         if (!mounted) return;
         _panelController.updatePanelType(
           ChatBottomPanelType.other,
-          data: EditorPanelType.emoji,
+          data: type,
           forceHandleFocus: ChatBottomHandleFocus.requestFocus,
         );
       });
+    }
+  }
+
+  /// 工具面板执行操作后收起面板、切回键盘
+  void _onToolPanelAction() {
+    if (_intendedPanel == EditorPanelType.tools) {
+      _togglePanel(EditorPanelType.tools);
     }
   }
 
@@ -379,7 +401,7 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
   }
 
   /// 当前是否显示表情面板
-  bool get showEmojiPanel => _emojiPanelIntended;
+  bool get showEmojiPanel => _intendedPanel == EditorPanelType.emoji;
 
   void _applyPanguSpacing() {
     if (_isApplyingPangu) return;
@@ -533,7 +555,7 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
     final wrappedField = Listener(
       onPointerUp: (_) {
         if (_readOnly) {
-          _emojiPanelIntended = false;
+          _intendedPanel = EditorPanelType.none;
           _updateReadOnly(false);
           _panelController.updatePanelType(ChatBottomPanelType.keyboard);
         }
@@ -554,44 +576,75 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
     return wrappedField;
   }
 
-  /// 构建表情面板，高度与键盘一致
-  Widget _buildEmojiPanel() {
+  /// 自定义面板高度：键盘高度已知时直接使用（与 _KeyboardPlaceholder 等高），
+  /// 否则用 emojiPanelHeight 兜底
+  double get _panelHeight {
     final safeBottom = MediaQuery.viewPaddingOf(context).bottom;
     final keyboardHeight = _panelController.keyboardHeight;
-    // 键盘高度已知时直接使用（与 _KeyboardPlaceholder 等高），
-    // 否则用 emojiPanelHeight 兜底
-    final height = keyboardHeight > 0
+    return keyboardHeight > 0
         ? max(keyboardHeight, safeBottom)
         : max(widget.emojiPanelHeight, safeBottom);
+  }
+
+  /// 构建表情面板，高度与键盘一致
+  Widget _buildEmojiPanel() {
+    // EmojiStickerPanel 只创建一次(见 _emojiPanelChild 注释);
+    // 高度变化只影响外层 SizedBox,不触达 grid 子树。
+    _emojiPanelChild ??= EmojiStickerPanel(
+      onEmojiSelected: (emoji) {
+        // 确保编辑器有焦点（搜索弹窗关闭后焦点可能丢失）
+        if (!_focusNode.hasFocus) {
+          _focusNode.requestFocus();
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _toolbarKey.currentState?.insertText(':${emoji.name}:');
+          });
+        } else {
+          _toolbarKey.currentState?.insertText(':${emoji.name}:');
+        }
+      },
+      onStickerSelected: (markdown) {
+        if (!_focusNode.hasFocus) {
+          _focusNode.requestFocus();
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _toolbarKey.currentState?.insertText(markdown);
+          });
+        } else {
+          _toolbarKey.currentState?.insertText(markdown);
+        }
+      },
+    );
     // TextFieldTapRegion 防止点击表情面板时 TextField 失焦
     return TextFieldTapRegion(
       child: SizedBox(
-        height: height,
-        child: EmojiStickerPanel(
-          onEmojiSelected: (emoji) {
-            // 确保编辑器有焦点（搜索弹窗关闭后焦点可能丢失）
-            if (!_focusNode.hasFocus) {
-              _focusNode.requestFocus();
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                _toolbarKey.currentState?.insertText(':${emoji.name}:');
-              });
-            } else {
-              _toolbarKey.currentState?.insertText(':${emoji.name}:');
-            }
-          },
-          onStickerSelected: (markdown) {
-            if (!_focusNode.hasFocus) {
-              _focusNode.requestFocus();
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                _toolbarKey.currentState?.insertText(markdown);
-              });
-            } else {
-              _toolbarKey.currentState?.insertText(markdown);
-            }
-          },
+        height: _panelHeight,
+        child: _emojiPanelChild,
+      ),
+    );
+  }
+
+  /// 构建网格工具面板，高度与键盘一致
+  Widget _buildToolPanel() {
+    // TextFieldTapRegion 防止点击工具面板时 TextField 失焦
+    return TextFieldTapRegion(
+      child: SizedBox(
+        height: _panelHeight,
+        child: MarkdownToolPanel(
+          toolbarKey: _toolbarKey,
+          onAction: _onToolPanelAction,
+          // 已开启自动混排时不显示该工具
+          onApplyPangu: ref.read(preferencesProvider).autoPanguSpacing
+              ? null
+              : _applyPanguSpacing,
         ),
       ),
     );
+  }
+
+  /// 构建当前意图面板对应的组件（用于焦点竞争时维持面板显示）
+  Widget _buildIntendedPanel() {
+    return _intendedPanel == EditorPanelType.tools
+        ? _buildToolPanel()
+        : _buildEmojiPanel();
   }
 
   @override
@@ -629,8 +682,16 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
           onTogglePreview: _togglePreview,
           onApplyPangu: _applyPanguSpacing,
           showPanguButton: !ref.watch(preferencesProvider).autoPanguSpacing,
-          onToggleEmoji: _toggleEmojiPanel,
-          isEmojiPanelVisible: _emojiPanelIntended,
+          onToggleEmoji: () => _togglePanel(EditorPanelType.emoji),
+          isEmojiPanelVisible: _intendedPanel == EditorPanelType.emoji,
+          // 桌面端空间充足，显示全部工具，不启用网格面板
+          onToggleTools:
+              _isDesktop ? null : () => _togglePanel(EditorPanelType.tools),
+          isToolsPanelVisible: _intendedPanel == EditorPanelType.tools,
+          // 移动端中部只显示用户自定义的外显工具（默认空）
+          visibleToolIds: _isDesktop
+              ? null
+              : ref.watch(preferencesProvider).editorToolbarTools,
         ),
         ),
 
@@ -639,10 +700,14 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
           controller: _panelController,
           inputFocusNode: _focusNode,
           otherPanelWidget: (type) {
-            if (type == EditorPanelType.emoji) {
-              return _buildEmojiPanel();
+            switch (type) {
+              case EditorPanelType.emoji:
+                return _buildEmojiPanel();
+              case EditorPanelType.tools:
+                return _buildToolPanel();
+              default:
+                return const SizedBox.shrink();
             }
-            return const SizedBox.shrink();
           },
           onPanelTypeChange: (panelType, data) {
             EditorPanelType newType;
@@ -655,36 +720,41 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
                 newType = data ?? EditorPanelType.none;
             }
 
-            // 表情面板应保持打开时（如搜索弹窗导致的焦点变化），忽略关闭请求
-            if (_emojiPanelIntended && newType != EditorPanelType.emoji) {
+            // 自定义面板应保持打开时（如搜索弹窗导致的焦点变化），忽略其他状态请求
+            if (_intendedPanel != EditorPanelType.none &&
+                newType != _intendedPanel) {
               return;
             }
 
-            final wasEmoji = _currentPanelType == EditorPanelType.emoji;
+            bool isCustomPanel(EditorPanelType type) =>
+                type == EditorPanelType.emoji || type == EditorPanelType.tools;
+
+            final wasCustom = isCustomPanel(_currentPanelType);
             final wasNone = _currentPanelType == EditorPanelType.none;
-            final isEmoji = newType == EditorPanelType.emoji;
+            final isCustom = isCustomPanel(newType);
 
             setState(() {
               _currentPanelType = newType;
             });
 
-            if (wasEmoji != isEmoji) {
-              widget.onEmojiPanelChanged?.call(isEmoji);
+            if (wasCustom != isCustom) {
+              widget.onEmojiPanelChanged?.call(isCustom);
               // 面板展开后，等 AnimatedSize 动画（200ms）结束再滚动到光标位置
-              if (isEmoji && wasNone) {
+              if (isCustom && wasNone) {
                 Future.delayed(const Duration(milliseconds: 200), () {
                   _scrollToCursor();
                 });
               }
             }
           },
-          // 自定义面板容器：键盘和表情面板等高，切换时工具栏位置不变
+          // 自定义面板容器：键盘和自定义面板等高，切换时工具栏位置不变
           customPanelContainer: (panelType, data) {
-            // 表情面板应保持打开时，无论 panelType 如何变化都继续显示表情面板
-            if (_emojiPanelIntended && panelType != ChatBottomPanelType.other) {
+            // 自定义面板应保持打开时，无论 panelType 如何变化都继续显示该面板
+            if (_intendedPanel != EditorPanelType.none &&
+                panelType != ChatBottomPanelType.other) {
               return ColoredBox(
                 color: theme.colorScheme.surface,
-                child: _buildEmojiPanel(),
+                child: _buildIntendedPanel(),
               );
             }
             switch (panelType) {
@@ -698,6 +768,12 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
                   return ColoredBox(
                     color: theme.colorScheme.surface,
                     child: _buildEmojiPanel(),
+                  );
+                }
+                if (data == EditorPanelType.tools) {
+                  return ColoredBox(
+                    color: theme.colorScheme.surface,
+                    child: _buildToolPanel(),
                   );
                 }
                 return const SizedBox.shrink();

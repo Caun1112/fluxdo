@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import '../l10n/ai_l10n.dart';
 import '../models/ai_provider.dart';
+import '../utils/api_host_formatter.dart';
 
 /// AI 供应商 API 服务
 class AiProviderApiService {
@@ -97,32 +98,11 @@ class AiProviderApiService {
     }
   }
 
-  /// 检查连通性
-  Future<bool> checkConnectivity(
-    AiProviderType type,
-    String baseUrl,
-    String apiKey,
-  ) async {
-    try {
-      switch (type) {
-        case AiProviderType.openai:
-        case AiProviderType.openaiResponse:
-          return await _checkOpenAiConnectivity(baseUrl, apiKey);
-        case AiProviderType.gemini:
-          return await _checkGeminiConnectivity(baseUrl, apiKey);
-        case AiProviderType.anthropic:
-          return await _checkAnthropicConnectivity(baseUrl, apiKey);
-      }
-    } catch (_) {
-      return false;
-    }
-  }
-
   Future<List<AiModel>> _fetchOpenAiModels(
       String baseUrl, String apiKey) async {
     final dio = _createDio();
     try {
-      final url = '${_trimTrailingSlash(baseUrl)}/models';
+      final url = '${ApiHostFormatter.format(baseUrl)}/models';
       final response = await dio.get(
         url,
         options: Options(headers: {'Authorization': 'Bearer $apiKey'}),
@@ -145,7 +125,10 @@ class AiProviderApiService {
       String baseUrl, String apiKey) async {
     final dio = _createDio();
     try {
-      final url = '${_trimTrailingSlash(baseUrl)}/models';
+      // Gemini 直连端点是 /v1beta/models;baseUrl 由用户配,可能带
+      // /v1beta、可能不带。format(apiVersion: 'v1beta') 自动补齐。
+      final url =
+          '${ApiHostFormatter.format(baseUrl, apiVersion: 'v1beta')}/models';
       final response = await dio.get(
         url,
         queryParameters: {'key': apiKey},
@@ -167,67 +150,6 @@ class AiProviderApiService {
     }
   }
 
-  Future<bool> _checkOpenAiConnectivity(
-      String baseUrl, String apiKey) async {
-    final dio = _createDio();
-    try {
-      final url = '${_trimTrailingSlash(baseUrl)}/models';
-      final response = await dio.get(
-        url,
-        options: Options(headers: {'Authorization': 'Bearer $apiKey'}),
-      );
-      return response.statusCode == 200;
-    } finally {
-      dio.close();
-    }
-  }
-
-  Future<bool> _checkGeminiConnectivity(
-      String baseUrl, String apiKey) async {
-    final dio = _createDio();
-    try {
-      final url = '${_trimTrailingSlash(baseUrl)}/models';
-      final response = await dio.get(
-        url,
-        queryParameters: {'key': apiKey},
-      );
-      return response.statusCode == 200;
-    } finally {
-      dio.close();
-    }
-  }
-
-  Future<bool> _checkAnthropicConnectivity(
-      String baseUrl, String apiKey) async {
-    final dio = _createDio();
-    try {
-      final url = '${_trimTrailingSlash(baseUrl)}/messages';
-      final response = await dio.post(
-        url,
-        data: {
-          'model': 'claude-sonnet-4-20250514',
-          'max_tokens': 1,
-          'messages': [
-            {'role': 'user', 'content': 'hi'}
-          ],
-        },
-        options: Options(headers: {
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
-        }),
-      );
-      // 200 或 400（参数错误但说明连通）都算成功
-      return response.statusCode == 200;
-    } on DioException catch (e) {
-      // 400 说明 API Key 有效，只是请求参数不满足
-      if (e.response?.statusCode == 400) return true;
-      return false;
-    } finally {
-      dio.close();
-    }
-  }
-
   /// 测试指定模型是否可用（发送最小请求）
   ///
   /// 成功返回 null，失败返回错误信息
@@ -238,12 +160,15 @@ class AiProviderApiService {
     String modelId,
   ) async {
     final dio = _createDio();
-    final url = _trimTrailingSlash(baseUrl);
+    // OpenAI / Anthropic 端点都是 /v1/<endpoint>,Gemini 是
+    // /v1beta/models/<id>:generateContent,分别按 provider 类型 format。
+    final openAiUrl = ApiHostFormatter.format(baseUrl);
+    final geminiUrl = ApiHostFormatter.format(baseUrl, apiVersion: 'v1beta');
     try {
       switch (type) {
         case AiProviderType.openai:
           await dio.post(
-            '$url/chat/completions',
+            '$openAiUrl/chat/completions',
             data: {
               'model': modelId,
               'messages': [
@@ -259,7 +184,7 @@ class AiProviderApiService {
 
         case AiProviderType.openaiResponse:
           await dio.post(
-            '$url/responses',
+            '$openAiUrl/responses',
             data: {
               'model': modelId,
               'input': 'hi',
@@ -273,7 +198,7 @@ class AiProviderApiService {
 
         case AiProviderType.gemini:
           await dio.post(
-            '$url/models/$modelId:generateContent',
+            '$geminiUrl/models/$modelId:generateContent',
             queryParameters: {'key': apiKey},
             data: {
               'contents': [
@@ -292,7 +217,7 @@ class AiProviderApiService {
 
         case AiProviderType.anthropic:
           await dio.post(
-            '$url/messages',
+            '$openAiUrl/messages',
             data: {
               'model': modelId,
               'max_tokens': 1,
@@ -313,9 +238,5 @@ class AiProviderApiService {
     } finally {
       dio.close();
     }
-  }
-
-  String _trimTrailingSlash(String url) {
-    return url.endsWith('/') ? url.substring(0, url.length - 1) : url;
   }
 }

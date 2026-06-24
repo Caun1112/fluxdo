@@ -179,10 +179,16 @@ import workmanager_apple
             result(false)
             return
           }
-          // 同时写入 HTTPCookieStorage.shared，配合 sharedCookiesEnabled
-          // 确保 WKWebView 在创建时即可从 shared storage 读取到 cookie
+          let writeSharedStorage = args["writeSharedStorage"] as? Bool ?? true
           CookieStoreObserverHandler.shared.beginInternalWrite()
-          HTTPCookieStorage.shared.setCookie(cookie)
+          let storage = HTTPCookieStorage.shared
+          if writeSharedStorage {
+            // 同时写入 HTTPCookieStorage.shared，配合 sharedCookiesEnabled
+            // 确保 WKWebView 在创建时即可从 shared storage 读取到 cookie。
+            storage.setCookie(cookie)
+          } else {
+            AppDelegate.deleteSharedCookieIOS(storage: storage, url: url, cookie: cookie)
+          }
           let store = WKWebsiteDataStore.default().httpCookieStore
           store.setCookie(cookie) {
             CookieStoreObserverHandler.shared.endInternalWrite()
@@ -447,6 +453,21 @@ import workmanager_apple
     }
   }
 
+  private static func deleteSharedCookieIOS(
+    storage: HTTPCookieStorage,
+    url: URL,
+    cookie: HTTPCookie
+  ) {
+    let host = (url.host ?? "").lowercased()
+    guard let sharedCookies = storage.cookies else { return }
+    for sharedCookie in sharedCookies where
+      sharedCookie.name == cookie.name &&
+      sharedCookie.path == cookie.path &&
+      AppDelegate.matchDomain(cookieDomain: sharedCookie.domain, candidate: cookie.domain, host: host) {
+      storage.deleteCookie(sharedCookie)
+    }
+  }
+
   /// 暴力穷举删除指定 name 的所有变体 (WK store + HTTPCookieStorage.shared 双删)
   private static func nukeAllVariantsIOS(
     url: URL,
@@ -459,13 +480,15 @@ import workmanager_apple
     let host = (url.host ?? "").lowercased()
 
     store.getAllCookies { cookies in
+      // 枚举真实 cookie 对象，按 name + 适用域过滤（与 countCookiesByNameIOS 对齐），
+      // 逐个 store.delete 真实对象。不再用 domainCandidates/pathCandidates 猜测，
+      // 杜绝 "count 数得到、nuke 删不掉" 的残留循环。
       let matching = cookies.filter { cookie in
         guard cookie.name == name else { return false }
-        let domainMatch = domainCandidates.contains { candidate in
-          AppDelegate.matchDomain(cookieDomain: cookie.domain, candidate: candidate, host: host)
-        }
-        let pathMatch = pathCandidates.contains(cookie.path)
-        return domainMatch && pathMatch
+        let cookieDomain = (cookie.domain.hasPrefix(".")
+          ? String(cookie.domain.dropFirst())
+          : cookie.domain).lowercased()
+        return host == cookieDomain || host.hasSuffix("." + cookieDomain)
       }
 
       CookieStoreObserverHandler.shared.beginInternalWrite()
@@ -487,11 +510,10 @@ import workmanager_apple
       let storage = HTTPCookieStorage.shared
       if let sharedCookies = storage.cookies {
         for cookie in sharedCookies where cookie.name == name {
-          let domainMatch = domainCandidates.contains { candidate in
-            AppDelegate.matchDomain(cookieDomain: cookie.domain, candidate: candidate, host: host)
-          }
-          let pathMatch = pathCandidates.contains(cookie.path)
-          if domainMatch && pathMatch {
+          let cookieDomain = (cookie.domain.hasPrefix(".")
+            ? String(cookie.domain.dropFirst())
+            : cookie.domain).lowercased()
+          if host == cookieDomain || host.hasSuffix("." + cookieDomain) {
             storage.deleteCookie(cookie)
           }
         }

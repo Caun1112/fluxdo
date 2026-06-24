@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../l10n/ai_l10n.dart';
@@ -6,6 +7,7 @@ import '../models/ai_provider.dart';
 import '../providers/ai_provider_providers.dart';
 import '../services/ai_provider_service.dart';
 import '../services/toast_delegate.dart';
+import '../utils/api_host_formatter.dart';
 import '../utils/dialog_utils.dart';
 import '../utils/model_capabilities.dart';
 import '../widgets/model_detail_sheet.dart';
@@ -36,10 +38,7 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
   int _tabIndex = 0;
 
   bool _obscureApiKey = true;
-  bool _isCheckingConnectivity = false;
   bool _isSaving = false;
-  bool? _connectivitySuccess;
-  String? _connectivityError;
   String? _testingModelId;
   final Map<String, String?> _modelTestResults = {};
 
@@ -84,40 +83,6 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
       }
       _selectedType = type;
     });
-  }
-
-  Future<void> _checkConnectivity() async {
-    final apiKey = _apiKeyCtrl.text.trim();
-    final baseUrl = _baseUrlCtrl.text.trim();
-    if (apiKey.isEmpty || baseUrl.isEmpty) {
-      AiToastDelegate.showInfo(AiL10n.current.pleaseEnterBaseUrlAndApiKey);
-      return;
-    }
-    setState(() {
-      _isCheckingConnectivity = true;
-      _connectivitySuccess = null;
-      _connectivityError = null;
-    });
-    try {
-      final service = ref.read(aiProviderApiServiceProvider);
-      final ok =
-          await service.checkConnectivity(_selectedType, baseUrl, apiKey);
-      if (mounted) {
-        setState(() {
-          _connectivitySuccess = ok;
-          _connectivityError = ok ? null : '';
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _connectivitySuccess = false;
-          _connectivityError = AiProviderApiService.friendlyError(e);
-        });
-      }
-    } finally {
-      if (mounted) setState(() => _isCheckingConnectivity = false);
-    }
   }
 
   Future<void> _testModel(String modelId) async {
@@ -356,8 +321,23 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
             ? AiL10n.current.editProvider
             : AiL10n.current.addProvider),
         actions: [
+          // 测试模型快捷入口:放 AppBar 避免在配置表单中段塞按钮显得割裂,
+          // 两个 tab(配置 / 模型)都能用同一个入口。
+          IconButton(
+            tooltip: AiL10n.current.testModel,
+            onPressed: _testingModelId != null ? null : _showTestModelPicker,
+            icon: _testingModelId != null
+                ? SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Theme.of(context).colorScheme.primary),
+                  )
+                : const Icon(Symbols.bolt_rounded),
+          ),
           Padding(
-            padding: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.only(right: 8, left: 4),
             child: FilledButton(
               onPressed: _isSaving ? null : _save,
               child: _isSaving
@@ -398,9 +378,9 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
 
   Widget _buildRail(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final destinations = [
-      (Icons.settings_outlined, Icons.settings, AiL10n.current.configTab),
-      (Icons.layers_outlined, Icons.layers, AiL10n.current.modelsTab),
+    final destinations = <(IconData, String)>[
+      (Symbols.settings_rounded, AiL10n.current.configTab),
+      (Symbols.layers_rounded, AiL10n.current.modelsTab),
     ];
 
     return SafeArea(
@@ -428,7 +408,8 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
                       height: 56,
                       child: Center(
                         child: Icon(
-                          selected ? d.$2 : d.$1,
+                          d.$1,
+                          fill: selected ? 1 : 0,
                           color: selected
                               ? cs.onSecondaryContainer
                               : cs.onSurfaceVariant,
@@ -453,13 +434,13 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
       onDestinationSelected: _switchTab,
       destinations: [
         NavigationDestination(
-          icon: const Icon(Icons.settings_outlined),
-          selectedIcon: const Icon(Icons.settings),
+          icon: const Icon(Symbols.settings_rounded),
+          selectedIcon: const Icon(Symbols.settings_rounded, fill: 1),
           label: AiL10n.current.configTab,
         ),
         NavigationDestination(
-          icon: const Icon(Icons.layers_outlined),
-          selectedIcon: const Icon(Icons.layers),
+          icon: const Icon(Symbols.layers_rounded),
+          selectedIcon: const Icon(Symbols.layers_rounded, fill: 1),
           label: AiL10n.current.modelsTab,
         ),
       ],
@@ -519,6 +500,41 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
           controller: _baseUrlCtrl,
           decoration: inputDeco('Base URL'),
         ),
+        // 实时预览实际请求路径,让用户看清自己配的 baseUrl 在补 /v1 后
+        // 会拼成什么。借鉴 Cherry Studio 的 host preview。
+        // 跟 SDK 行为一致:OpenAI / Anthropic 走 /v1,Gemini 走 /v1beta。
+        ValueListenableBuilder<TextEditingValue>(
+          valueListenable: _baseUrlCtrl,
+          builder: (context, value, _) {
+            final raw = value.text.trim();
+            if (raw.isEmpty) return const SizedBox.shrink();
+            final apiVersion = _selectedType == AiProviderType.gemini
+                ? 'v1beta'
+                : 'v1';
+            final formatted = ApiHostFormatter.format(
+              raw,
+              apiVersion: apiVersion,
+            );
+            final endpoint = switch (_selectedType) {
+              AiProviderType.openai => '/chat/completions',
+              AiProviderType.openaiResponse => '/responses',
+              AiProviderType.anthropic => '/messages',
+              AiProviderType.gemini => '/models/{model}:generateContent',
+            };
+            return Padding(
+              padding: const EdgeInsets.only(top: 6, left: 4),
+              child: Text(
+                AiL10n.current.baseUrlPreview('$formatted$endpoint'),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context)
+                          .colorScheme
+                          .onSurface
+                          .withValues(alpha: 0.6),
+                    ),
+              ),
+            );
+          },
+        ),
         const SizedBox(height: 14),
         TextField(
           controller: _apiKeyCtrl,
@@ -526,80 +542,14 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
           decoration: inputDeco('API Key',
               suffix: IconButton(
                 icon: Icon(_obscureApiKey
-                    ? Icons.visibility_off
-                    : Icons.visibility),
+                    ? Symbols.visibility_off_rounded
+                    : Symbols.visibility_rounded),
                 onPressed: () =>
                     setState(() => _obscureApiKey = !_obscureApiKey),
               )),
         ),
-        const SizedBox(height: 20),
-        // 连通性 + 测试
-        Row(
-          children: [
-            Expanded(
-              child: FilledButton.tonalIcon(
-                onPressed:
-                    _isCheckingConnectivity ? null : _checkConnectivity,
-                icon: _isCheckingConnectivity
-                    ? SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: cs.primary),
-                      )
-                    : const Icon(Icons.wifi_tethering, size: 18),
-                label: Text(AiL10n.current.connectivityCheck),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: FilledButton.tonalIcon(
-                onPressed:
-                    _testingModelId != null ? null : _showTestModelPicker,
-                icon: _testingModelId != null
-                    ? SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                            strokeWidth: 2, color: cs.primary),
-                      )
-                    : const Icon(Icons.play_arrow_rounded, size: 18),
-                label: Text(AiL10n.current.testModel),
-              ),
-            ),
-          ],
-        ),
-        if (_connectivitySuccess != null) ...[
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Icon(
-                _connectivitySuccess! ? Icons.check_circle : Icons.error,
-                size: 18,
-                color:
-                    _connectivitySuccess! ? Colors.green : cs.error,
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  _connectivitySuccess!
-                      ? AiL10n.current.connectionSuccess
-                      : (_connectivityError != null &&
-                              _connectivityError!.isNotEmpty
-                          ? AiL10n.current.connectionFailedWithError(
-                              _connectivityError!)
-                          : AiL10n.current.connectionFailed),
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: _connectivitySuccess!
-                        ? Colors.green
-                        : cs.error,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ],
+        // 测试模型按钮挪到 AppBar 右上角(闪电图标),避免表单中段塞按钮
+        // 显得割裂,且两个 tab 都能复用同一个入口。
       ],
     );
   }
@@ -619,7 +569,7 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.layers_outlined,
+                    Icon(Symbols.layers_rounded,
                         size: 48,
                         color: cs.onSurfaceVariant.withValues(alpha: 0.4)),
                     const SizedBox(height: 12),
@@ -679,7 +629,7 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
                 children: [
                   // 获取模型
                   _FloatingPill(
-                    icon: Icons.cloud_download_outlined,
+                    icon: Symbols.cloud_download_rounded,
                     label: AiL10n.current.fetchModels,
                     outlined: true,
                     onTap: _fetchAndSelectModels,
@@ -687,7 +637,7 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
                   const SizedBox(width: 6),
                   // 手动添加
                   _FloatingPill(
-                    icon: Icons.add,
+                    icon: Symbols.add_rounded,
                     label: AiL10n.current.manuallyAdd,
                     filled: true,
                     onTap: _addModelManually,
@@ -758,7 +708,7 @@ class _AiProviderEditPageState extends ConsumerState<AiProviderEditPage> {
                   ),
                 ),
                 IconButton(
-                  icon: Icon(Icons.delete_outline,
+                  icon: Icon(Symbols.delete_rounded,
                       color: cs.error.withValues(alpha: 0.7), size: 20),
                   tooltip: AiL10n.current.remove,
                   visualDensity: VisualDensity.compact,
@@ -989,7 +939,7 @@ class _FetchedModelsSelectorState extends State<_FetchedModelsSelector> {
                   onChanged: (v) => setState(() => _search = v),
                   decoration: InputDecoration(
                     hintText: AiL10n.current.searchModelsHint,
-                    prefixIcon: const Icon(Icons.search, size: 20),
+                    prefixIcon: const Icon(Symbols.search_rounded, size: 20),
                     isDense: true,
                     filled: true,
                     fillColor:
@@ -1002,8 +952,8 @@ class _FetchedModelsSelectorState extends State<_FetchedModelsSelector> {
                         ? IconButton(
                             icon: Icon(
                               allActive
-                                  ? Icons.deselect
-                                  : Icons.select_all,
+                                  ? Symbols.deselect_rounded
+                                  : Symbols.select_all_rounded,
                               size: 22,
                               color: cs.onSurface.withValues(alpha: 0.7),
                             ),
@@ -1032,7 +982,7 @@ class _FetchedModelsSelectorState extends State<_FetchedModelsSelector> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.error_outline, size: 48, color: cs.error),
+              Icon(Symbols.error_rounded, size: 48, color: cs.error),
               const SizedBox(height: 12),
               Text(_error!, textAlign: TextAlign.center,
                   style: TextStyle(color: cs.error)),
@@ -1099,8 +1049,8 @@ class _FetchedModelsSelectorState extends State<_FetchedModelsSelector> {
                   children: [
                     Icon(
                       isCollapsed
-                          ? Icons.chevron_right
-                          : Icons.expand_more,
+                          ? Symbols.chevron_right_rounded
+                          : Symbols.expand_more_rounded,
                       size: 20,
                       color: cs.onSurfaceVariant,
                     ),
@@ -1129,10 +1079,10 @@ class _FetchedModelsSelectorState extends State<_FetchedModelsSelector> {
                             horizontal: 8, vertical: 2),
                         child: Icon(
                           groupAllActive
-                              ? Icons.check_box
+                              ? Symbols.check_box_rounded
                               : (groupActiveCount > 0
-                                  ? Icons.indeterminate_check_box
-                                  : Icons.check_box_outline_blank),
+                                  ? Symbols.indeterminate_check_box_rounded
+                                  : Symbols.check_box_outline_blank_rounded),
                           size: 20,
                           color: groupAllActive || groupActiveCount > 0
                               ? cs.primary

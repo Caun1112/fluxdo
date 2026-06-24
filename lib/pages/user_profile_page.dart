@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:extended_nested_scroll_view/extended_nested_scroll_view.dart';
@@ -11,6 +12,7 @@ import '../services/discourse_cache_manager.dart';
 import '../utils/time_utils.dart';
 import '../widgets/common/relative_time_text.dart';
 import '../utils/number_utils.dart';
+import '../utils/load_more_coordinator.dart';
 import '../utils/pagination_helper.dart';
 import '../services/emoji_handler.dart';
 import 'package:dio/dio.dart';
@@ -20,11 +22,14 @@ import '../utils/share_utils.dart';
 import '../providers/preferences_provider.dart';
 import '../widgets/common/flair_badge.dart';
 import '../widgets/common/grain_gradient_background.dart';
+import '../widgets/common/error_view.dart';
+import '../widgets/common/paged_list_footer.dart';
 import '../widgets/common/smart_avatar.dart';
 import '../widgets/content/discourse_html_content/discourse_html_content_widget.dart';
 import '../widgets/content/collapsed_html_content.dart';
 import '../widgets/post/reply_sheet.dart';
 import '../widgets/user/user_profile_skeleton.dart';
+import '../widgets/user/ignore_duration_picker.dart';
 import '../widgets/badge/badge_ui_utils.dart';
 import '../services/toast_service.dart';
 import '../models/badge.dart' as badge_model;
@@ -33,7 +38,7 @@ import 'search_page.dart';
 import 'follow_list_page.dart';
 import 'image_viewer_page.dart';
 import 'badge_page.dart';
-import '../widgets/common/dismissible_popup_menu.dart';
+import 'package:common_ui/common_ui.dart';
 import '../l10n/s.dart';
 import '../utils/dialog_utils.dart';
 
@@ -54,7 +59,8 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
   User? _user;
   UserSummary? _summary;
   bool _isLoading = true;
-  String? _error;
+  Object? _error;
+  StackTrace? _errorStack;
 
   // 关注状态
   bool _isFollowed = false;
@@ -67,11 +73,15 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
   final Map<String, List<UserAction>> _actionsCache = {};
   final Map<String, bool> _hasMoreCache = {};
   final Map<String, bool> _loadingCache = {};
+  final Map<String, bool> _loadMoreFailedCache = {};
+  final Map<String, LoadMoreCoordinator> _actionLoadMoreCoordinators = {};
 
   // 回应列表单独缓存
   List<UserReaction>? _reactionsCache;
   bool _reactionsHasMore = true;
   bool _reactionsLoading = false;
+  bool _reactionsLoadMoreFailed = false;
+  final LoadMoreCoordinator _reactionsLoadMoreCoordinator = LoadMoreCoordinator();
 
   // tab 对应的 filter: summary=总结, 4,5=全部(话题+回复), 4=话题, 5=回复, 1=点赞, reactions=回应
   static const List<String> _tabFilters = ['summary', '4,5', '4', '5', '1', 'reactions'];
@@ -141,17 +151,17 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
         });
         // 总结 tab 数据已从 _summary 获取，无需额外加载
       }
-    } catch (e) {
+    } catch (e, s) {
       if (mounted) {
         setState(() {
-          _error = e.toString();
+          _error = e;
+          _errorStack = s;
           _isLoading = false;
         });
       }
     }
   }
 
-  /// 切换关注状态
   Future<void> _toggleFollow() async {
     if (_user == null || _isFollowLoading) return;
 
@@ -265,90 +275,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
   }
 
   /// 显示忽略时长选择弹窗，返回 expiringAt 时间字符串
-  Future<String?> _showIgnoreDurationPicker() async {
-    // 与 Discourse 前端 extendedDefaultTimeShortcuts 保持一致
-    final now = DateTime.now();
-    final weekdays = ['', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
-    String formatTarget(DateTime target) {
-      // 永久不显示时间
-      if (target.year - now.year > 100) return '';
-      final h = target.hour.toString().padLeft(2, '0');
-      final m = target.minute.toString().padLeft(2, '0');
-      final time = '$h:$m';
-      // 同一天只显示时间
-      if (target.day == now.day && target.month == now.month && target.year == now.year) {
-        return time;
-      }
-      // 同年显示 月日 周几 时间
-      if (target.year == now.year) {
-        return '${S.current.time_shortDate(target.month, target.day)} ${weekdays[target.weekday]} $time';
-      }
-      // 跨年显示完整日期
-      return '${S.current.time_fullDate(target.year, target.month, target.day)} $time';
-    }
-
-    final options = <(String, Duration)>[
-      if (now.hour < 18)
-        (S.current.userProfile_laterToday, Duration(hours: 18 - now.hour)),
-      (S.current.userProfile_tomorrow, Duration(days: 1)),
-      if (now.weekday <= DateTime.wednesday)
-        (S.current.userProfile_laterThisWeek, Duration(days: DateTime.thursday - now.weekday)),
-      (S.current.userProfile_nextMonday, Duration(days: (DateTime.monday - now.weekday + 7) % 7 == 0 ? 7 : (DateTime.monday - now.weekday + 7) % 7)),
-      (S.current.userProfile_twoWeeks, Duration(days: 14)),
-      (S.current.userProfile_nextMonth, Duration(days: 30)),
-      (S.current.userProfile_twoMonths, Duration(days: 60)),
-      (S.current.userProfile_threeMonths, Duration(days: 90)),
-      (S.current.userProfile_fourMonths, Duration(days: 120)),
-      (S.current.userProfile_sixMonths, Duration(days: 180)),
-      (S.current.userProfile_oneYear, Duration(days: 365)),
-      (S.current.userProfile_permanent, Duration(days: 365000)),
-    ];
-
-    return showAppBottomSheet<String>(
-      context: context,
-      builder: (context) {
-        final theme = Theme.of(context);
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                child: Text(
-                  context.l10n.userProfile_selectIgnoreDuration,
-                  style: theme.textTheme.titleMedium,
-                ),
-              ),
-              const Divider(),
-              Flexible(
-                child: ListView(
-                  shrinkWrap: true,
-                  children: options.map((option) {
-                    final target = now.add(option.$2);
-                    final desc = formatTarget(target);
-                    return ListTile(
-                      title: Text(option.$1),
-                      trailing: desc.isNotEmpty
-                          ? Text(desc, style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ))
-                          : null,
-                      onTap: () {
-                        final expiry = DateTime.now().toUtc().add(option.$2);
-                        Navigator.pop(context, expiry.toIso8601String());
-                      },
-                    );
-                  }).toList(),
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
-          ),
-        );
-      },
-    );
-  }
+  Future<String?> _showIgnoreDurationPicker() => showIgnoreDurationPicker(context);
 
   /// 显示用户详细信息弹窗
   void _showUserInfo() {
@@ -426,7 +353,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                       if (isSuspended)
                         _buildRestrictionSection(
                           theme,
-                          icon: Icons.block_rounded,
+                          icon: Symbols.block_rounded,
                           title: context.l10n.userProfile_suspendedStatus,
                           label: _user!.isSuspendedForever
                               ? context.l10n.userProfile_permanentlySuspended
@@ -437,7 +364,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                       if (isSilenced)
                         _buildRestrictionSection(
                           theme,
-                          icon: Icons.mic_off_rounded,
+                          icon: Symbols.mic_off_rounded,
                           title: context.l10n.userProfile_silencedStatus,
                           label: _user!.isSilencedForever
                               ? context.l10n.userProfile_permanentlySilenced
@@ -479,7 +406,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                         if (hasLocation)
                           _buildInfoRow(
                             context,
-                            Icons.location_on_outlined,
+                            Symbols.location_on_rounded,
                             context.l10n.userProfile_location,
                             _user!.location!,
                           ),
@@ -487,7 +414,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                         if (hasWebsite)
                           _buildInfoRow(
                             context,
-                            Icons.link_rounded,
+                            Symbols.link_rounded,
                             context.l10n.userProfile_website,
                             _user!.websiteName ?? _user!.website!,
                             url: _user!.website,
@@ -497,7 +424,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                         if (hasJoinedAt)
                           _buildInfoRow(
                             context,
-                            Icons.calendar_today_rounded,
+                            Symbols.calendar_today_rounded,
                             context.l10n.userProfile_joinDate,
                             TimeUtils.formatFullDate(_user!.createdAt),
                           ),
@@ -621,7 +548,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
             ),
             if (isLink)
               Icon(
-                Icons.open_in_new_rounded,
+                Symbols.open_in_new_rounded,
                 size: 16,
                 color: theme.colorScheme.outline.withValues(alpha:0.5),
               ),
@@ -643,11 +570,44 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
     expectedPageSize: 20,
   );
 
+  LoadMoreCoordinator _actionLoadMoreCoordinator(String filter) {
+    return _actionLoadMoreCoordinators.putIfAbsent(
+      filter,
+      () => LoadMoreCoordinator(),
+    );
+  }
+
+  Future<void> _loadMoreActions(String filter) async {
+    final coordinator = _actionLoadMoreCoordinator(filter);
+    await coordinator.loadMore(
+      loadMore: () => _loadActions(filter, loadMore: true),
+      hasMore: () => _hasMoreCache[filter] ?? true,
+      isActive: () => mounted,
+      progressCount: () => _actionsCache[filter]?.length ?? 0,
+    );
+  }
+
+  Future<void> _loadMoreReactions() async {
+    await _reactionsLoadMoreCoordinator.loadMore(
+      loadMore: () => _loadReactions(loadMore: true),
+      hasMore: () => _reactionsHasMore,
+      isActive: () => mounted,
+      progressCount: () => _reactionsCache?.length ?? 0,
+    );
+  }
+
   Future<void> _loadActions(String filter, {bool loadMore = false}) async {
     // 如果已有数据且正在加载，跳过（防止重复加载更多）
     if (_loadingCache[filter] == true && _actionsCache.containsKey(filter)) return;
 
-    setState(() => _loadingCache[filter] = true);
+    if (!loadMore) {
+      _actionLoadMoreCoordinator(filter).resetCooldown();
+    }
+
+    setState(() {
+      _loadingCache[filter] = true;
+      _loadMoreFailedCache[filter] = false;
+    });
 
     try {
       final service = ref.read(discourseServiceProvider);
@@ -676,11 +636,17 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
             _hasMoreCache[filter] = result.hasMore;
           }
           _loadingCache[filter] = false;
+          _loadMoreFailedCache[filter] = false;
         });
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _loadingCache[filter] = false);
+        setState(() {
+          _loadingCache[filter] = false;
+          if (loadMore) {
+            _loadMoreFailedCache[filter] = true;
+          }
+        });
       }
     }
   }
@@ -688,7 +654,14 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
   Future<void> _loadReactions({bool loadMore = false}) async {
     if (_reactionsLoading && _reactionsCache != null) return;
 
-    setState(() => _reactionsLoading = true);
+    if (!loadMore) {
+      _reactionsLoadMoreCoordinator.resetCooldown();
+    }
+
+    setState(() {
+      _reactionsLoading = true;
+      _reactionsLoadMoreFailed = false;
+    });
 
     try {
       final service = ref.read(discourseServiceProvider);
@@ -715,11 +688,17 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
             _reactionsHasMore = result.hasMore;
           }
           _reactionsLoading = false;
+          _reactionsLoadMoreFailed = false;
         });
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _reactionsLoading = false);
+        setState(() {
+          _reactionsLoading = false;
+          if (loadMore) {
+            _reactionsLoadMoreFailed = true;
+          }
+        });
       }
     }
   }
@@ -736,7 +715,18 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
     if (_error != null) {
       return Scaffold(
         appBar: AppBar(title: Text(widget.username)),
-        body: Center(child: Text('${context.l10n.common_loadFailed}: $_error')),
+        body: ErrorView(
+          error: _error!,
+          stackTrace: _errorStack,
+          onRetry: () {
+            setState(() {
+              _isLoading = true;
+              _error = null;
+              _errorStack = null;
+            });
+            _loadUser();
+          },
+        ),
       );
     }
 
@@ -799,17 +789,17 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
       iconTheme: const IconThemeData(color: Colors.white),
       actions: [
         IconButton(
-          icon: const Icon(Icons.search),
+          icon: const Icon(Symbols.search_rounded),
           onPressed: () => _openUserSearch(),
         ),
         if (_user != null && _user!.canSendPrivateMessageToUser != false)
           IconButton(
             onPressed: _openMessageDialog,
-            icon: const Icon(Icons.mail_outline_rounded),
+            icon: const Icon(Symbols.mail_rounded),
             tooltip: context.l10n.userProfile_message,
           ),
         SwipeDismissiblePopupMenuButton<String>(
-          icon: const Icon(Icons.more_vert),
+          icon: const Icon(Symbols.more_vert_rounded),
           onSelected: (value) {
             switch (value) {
               case 'about':
@@ -831,7 +821,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                 value: 'about',
                 child: Row(
                   children: [
-                    Icon(Icons.info_outline_rounded, size: 20, color: theme.colorScheme.onSurface),
+                    Icon(Symbols.info_rounded, size: 20, color: theme.colorScheme.onSurface),
                     const SizedBox(width: 12),
                     Text(context.l10n.common_about),
                   ],
@@ -841,7 +831,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                 value: 'share',
                 child: Row(
                   children: [
-                    Icon(Icons.share_outlined, size: 20, color: theme.colorScheme.onSurface),
+                    Icon(Symbols.share_rounded, size: 20, color: theme.colorScheme.onSurface),
                     const SizedBox(width: 12),
                     Text(context.l10n.userProfile_shareUser),
                   ],
@@ -854,11 +844,11 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                   value: 'level_normal',
                   child: Row(
                     children: [
-                      Icon(Icons.notifications_outlined, size: 20, color: theme.colorScheme.onSurface),
+                      Icon(Symbols.notifications_rounded, size: 20, color: theme.colorScheme.onSurface),
                       const SizedBox(width: 12),
                       Expanded(child: Text(context.l10n.userProfile_normal)),
                       if (_notificationLevel == 'normal')
-                        Icon(Icons.check, size: 18, color: theme.colorScheme.primary),
+                        Icon(Symbols.check_rounded, size: 18, color: theme.colorScheme.primary),
                     ],
                   ),
                 ),
@@ -867,11 +857,11 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                     value: 'level_mute',
                     child: Row(
                       children: [
-                        Icon(Icons.notifications_off_outlined, size: 20, color: theme.colorScheme.onSurface),
+                        Icon(Symbols.notifications_off_rounded, size: 20, color: theme.colorScheme.onSurface),
                         const SizedBox(width: 12),
                         Expanded(child: Text(context.l10n.userProfile_mute)),
                         if (_notificationLevel == 'mute')
-                          Icon(Icons.check, size: 18, color: theme.colorScheme.primary),
+                          Icon(Symbols.check_rounded, size: 18, color: theme.colorScheme.primary),
                       ],
                     ),
                   ),
@@ -880,11 +870,11 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                     value: 'level_ignore',
                     child: Row(
                       children: [
-                        Icon(Icons.visibility_off_outlined, size: 20, color: theme.colorScheme.onSurface),
+                        Icon(Symbols.visibility_off_rounded, size: 20, color: theme.colorScheme.onSurface),
                         const SizedBox(width: 12),
                         Expanded(child: Text(context.l10n.userProfile_ignored)),
                         if (_notificationLevel == 'ignore')
-                          Icon(Icons.check, size: 18, color: theme.colorScheme.primary),
+                          Icon(Symbols.check_rounded, size: 18, color: theme.colorScheme.primary),
                       ],
                     ),
                   ),
@@ -1117,7 +1107,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                               // 封禁提示
                               if (_user!.isSuspended) ...[
                                 _buildRestrictionBanner(
-                                  icon: Icons.block_rounded,
+                                  icon: Symbols.block_rounded,
                                   label: _user!.isSuspendedForever
                                       ? context.l10n.userProfile_suspendedBannerForever
                                       : context.l10n.userProfile_suspendedBannerUntil(TimeUtils.formatFullDate(_user!.suspendedTill)),
@@ -1130,7 +1120,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                               // 禁言提示
                               if (_user!.isSilenced)
                                 _buildRestrictionBanner(
-                                  icon: Icons.mic_off_rounded,
+                                  icon: Symbols.mic_off_rounded,
                                   label: _user!.isSilencedForever
                                       ? context.l10n.userProfile_silencedBannerForever
                                       : context.l10n.userProfile_silencedBannerUntil(TimeUtils.formatFullDate(_user!.silencedTill)),
@@ -1181,7 +1171,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                                 if (hasInfo) ...[
                                   const SizedBox(width: 8),
                                   Icon(
-                                    Icons.chevron_right,
+                                    Symbols.chevron_right_rounded,
                                     size: 16,
                                     color: Colors.white.withValues(alpha:0.6),
                                   ),
@@ -1258,7 +1248,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              const Icon(Icons.flash_on_rounded, size: 12, color: Colors.white70),
+                              const Icon(Symbols.flash_on_rounded, size: 12, color: Colors.white70),
                               const SizedBox(width: 4),
                               RelativeTimeText(
                                 dateTime: _user?.lastSeenAt ?? _user!.lastPostedAt!,
@@ -1384,7 +1374,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
         : TextButton.icon(
             onPressed: _toggleFollow,
             icon: Icon(
-              _isFollowed ? Icons.check_rounded : Icons.add_rounded,
+              _isFollowed ? Symbols.check_rounded : Symbols.add_rounded,
               size: 16,
             ),
             label: Text(_isFollowed ? context.l10n.userProfile_followed : context.l10n.userProfile_follow),
@@ -1491,6 +1481,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
     final actions = _actionsCache[filter];
     final isLoading = _loadingCache[filter] == true;
     final hasMore = _hasMoreCache[filter] ?? true;
+    final loadMoreCoordinator = _actionLoadMoreCoordinator(filter);
 
     // 优先检查 loading 状态
     if (isLoading && actions == null) {
@@ -1503,7 +1494,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.inbox_outlined, size: 48, color: Colors.grey[400]),
+            Icon(Symbols.inbox_rounded, size: 48, color: Colors.grey[400]),
             const SizedBox(height: 8),
             Text(context.l10n.userProfile_noContent, style: TextStyle(color: Colors.grey[600])),
           ],
@@ -1513,11 +1504,12 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
 
     return NotificationListener<ScrollNotification>(
       onNotification: (notification) {
-        if (notification is ScrollEndNotification &&
-            notification.metrics.pixels >= notification.metrics.maxScrollExtent - 200 &&
-            hasMore &&
-            !isLoading) {
-          _loadActions(filter, loadMore: true);
+        if (notification.metrics.axis == Axis.vertical) {
+          final distance =
+              notification.metrics.maxScrollExtent - notification.metrics.pixels;
+          if (loadMoreCoordinator.shouldTriggerForDistance(distance)) {
+            _loadMoreActions(filter);
+          }
         }
         return false;
       },
@@ -1525,12 +1517,14 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
         onRefresh: () => _loadActions(filter),
         child: ListView.builder(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          itemCount: actions.length + (hasMore ? 1 : 0),
+          itemCount: actions.length + 1,
           itemBuilder: (context, index) {
             if (index == actions.length) {
-              return const Padding(
-                padding: EdgeInsets.all(16),
-                child: Center(child: CircularProgressIndicator()),
+              return PagedListFooter(
+                hasMore: hasMore,
+                isLoadingMore: loadMoreCoordinator.isRunning && isLoading,
+                isLoadMoreFailed: _loadMoreFailedCache[filter] == true,
+                onRetry: () => _loadMoreActions(filter),
               );
             }
             return _buildActionItem(actions[index]);
@@ -1553,7 +1547,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
       children: [
         // 热门话题
         if (summary.topics.isNotEmpty) ...[
-          _buildSectionHeader(theme, Icons.article_rounded, context.l10n.userProfile_topTopics),
+          _buildSectionHeader(theme, Symbols.article_rounded, context.l10n.userProfile_topTopics),
           const SizedBox(height: 8),
           ...summary.topics.map((topic) => _buildSummaryTopicItem(theme, topic)),
           const SizedBox(height: 20),
@@ -1561,7 +1555,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
 
         // 热门回复
         if (summary.replies.isNotEmpty) ...[
-          _buildSectionHeader(theme, Icons.chat_bubble_rounded, context.l10n.userProfile_topReplies),
+          _buildSectionHeader(theme, Symbols.chat_bubble_rounded, context.l10n.userProfile_topReplies),
           const SizedBox(height: 8),
           ...summary.replies.map((reply) => _buildSummaryReplyItem(theme, reply)),
           const SizedBox(height: 20),
@@ -1569,7 +1563,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
 
         // 热门链接
         if (summary.links.isNotEmpty) ...[
-          _buildSectionHeader(theme, Icons.link_rounded, context.l10n.userProfile_topLinks),
+          _buildSectionHeader(theme, Symbols.link_rounded, context.l10n.userProfile_topLinks),
           const SizedBox(height: 8),
           ...summary.links.map((link) => _buildSummaryLinkItem(theme, link)),
           const SizedBox(height: 20),
@@ -1577,7 +1571,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
 
         // 最多回复至
         if (summary.mostRepliedToUsers.isNotEmpty) ...[
-          _buildSectionHeader(theme, Icons.reply_rounded, context.l10n.userProfile_mostRepliedTo),
+          _buildSectionHeader(theme, Symbols.reply_rounded, context.l10n.userProfile_mostRepliedTo),
           const SizedBox(height: 8),
           _buildUserChips(theme, summary.mostRepliedToUsers),
           const SizedBox(height: 20),
@@ -1585,7 +1579,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
 
         // 被谁赞的最多
         if (summary.mostLikedByUsers.isNotEmpty) ...[
-          _buildSectionHeader(theme, Icons.favorite_rounded, context.l10n.userProfile_mostLikedBy),
+          _buildSectionHeader(theme, Symbols.favorite_rounded, context.l10n.userProfile_mostLikedBy),
           const SizedBox(height: 8),
           _buildUserChips(theme, summary.mostLikedByUsers),
           const SizedBox(height: 20),
@@ -1593,7 +1587,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
 
         // 赞最多
         if (summary.mostLikedUsers.isNotEmpty) ...[
-          _buildSectionHeader(theme, Icons.thumb_up_rounded, context.l10n.userProfile_mostLiked),
+          _buildSectionHeader(theme, Symbols.thumb_up_rounded, context.l10n.userProfile_mostLiked),
           const SizedBox(height: 8),
           _buildUserChips(theme, summary.mostLikedUsers),
           const SizedBox(height: 20),
@@ -1601,7 +1595,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
 
         // 热门类别
         if (summary.topCategories.isNotEmpty) ...[
-          _buildSectionHeader(theme, Icons.category_rounded, context.l10n.userProfile_topCategories),
+          _buildSectionHeader(theme, Symbols.category_rounded, context.l10n.userProfile_topCategories),
           const SizedBox(height: 8),
           ...summary.topCategories.map((cat) => _buildSummaryCategoryItem(theme, cat)),
           const SizedBox(height: 20),
@@ -1609,7 +1603,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
 
         // 热门徽章
         if (summary.badges.isNotEmpty) ...[
-          _buildSectionHeader(theme, Icons.military_tech_rounded, context.l10n.userProfile_topBadges),
+          _buildSectionHeader(theme, Symbols.military_tech_rounded, context.l10n.userProfile_topBadges),
           const SizedBox(height: 8),
           _buildBadgeChips(theme, summary.badges),
           const SizedBox(height: 20),
@@ -1629,7 +1623,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
               padding: const EdgeInsets.only(top: 80),
               child: Column(
                 children: [
-                  Icon(Icons.summarize_outlined, size: 48, color: Colors.grey[400]),
+                  Icon(Symbols.summarize_rounded, size: 48, color: Colors.grey[400]),
                   const SizedBox(height: 8),
                   Text(context.l10n.userProfile_noSummary, style: TextStyle(color: Colors.grey[600])),
                 ],
@@ -1686,7 +1680,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
               ),
               if (topic.likeCount > 0) ...[
                 const SizedBox(width: 8),
-                Icon(Icons.favorite_rounded, size: 14, color: theme.colorScheme.outline),
+                Icon(Symbols.favorite_rounded, size: 14, color: theme.colorScheme.outline),
                 const SizedBox(width: 2),
                 Text(
                   '${topic.likeCount}',
@@ -1737,7 +1731,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
               ),
               if (reply.likeCount > 0) ...[
                 const SizedBox(width: 8),
-                Icon(Icons.favorite_rounded, size: 14, color: theme.colorScheme.outline),
+                Icon(Symbols.favorite_rounded, size: 14, color: theme.colorScheme.outline),
                 const SizedBox(width: 2),
                 Text(
                   '${reply.likeCount}',
@@ -1777,7 +1771,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
           padding: const EdgeInsets.all(12),
           child: Row(
             children: [
-              Icon(Icons.open_in_new_rounded, size: 16, color: theme.colorScheme.outline),
+              Icon(Symbols.open_in_new_rounded, size: 16, color: theme.colorScheme.outline),
               const SizedBox(width: 8),
               Expanded(
                 child: Column(
@@ -1988,7 +1982,7 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.emoji_emotions_outlined, size: 48, color: Colors.grey[400]),
+            Icon(Symbols.emoji_emotions_rounded, size: 48, color: Colors.grey[400]),
             const SizedBox(height: 8),
             Text(context.l10n.userProfile_noReactions, style: TextStyle(color: Colors.grey[600])),
           ],
@@ -1998,11 +1992,12 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
 
     return NotificationListener<ScrollNotification>(
       onNotification: (notification) {
-        if (notification is ScrollEndNotification &&
-            notification.metrics.pixels >= notification.metrics.maxScrollExtent - 200 &&
-            hasMore &&
-            !isLoading) {
-          _loadReactions(loadMore: true);
+        if (notification.metrics.axis == Axis.vertical) {
+          final distance =
+              notification.metrics.maxScrollExtent - notification.metrics.pixels;
+          if (_reactionsLoadMoreCoordinator.shouldTriggerForDistance(distance)) {
+            _loadMoreReactions();
+          }
         }
         return false;
       },
@@ -2010,12 +2005,15 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
         onRefresh: () => _loadReactions(),
         child: ListView.builder(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          itemCount: reactions.length + (hasMore ? 1 : 0),
+          itemCount: reactions.length + 1,
           itemBuilder: (context, index) {
             if (index == reactions.length) {
-              return const Padding(
-                padding: EdgeInsets.all(16),
-                child: Center(child: CircularProgressIndicator()),
+              return PagedListFooter(
+                hasMore: hasMore,
+                isLoadingMore:
+                    _reactionsLoadMoreCoordinator.isRunning && isLoading,
+                isLoadMoreFailed: _reactionsLoadMoreFailed,
+                onRetry: _loadMoreReactions,
               );
             }
             return _buildReactionItem(reactions[index]);
@@ -2147,10 +2145,10 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
                       image: emojiImageProvider(emojiUrl),
                       width: 20,
                       height: 20,
-                      errorBuilder: (_, _, _) => const Icon(Icons.emoji_emotions, size: 20),
+                      errorBuilder: (_, _, _) => const Icon(Symbols.emoji_emotions_rounded, size: 20),
                     )
                   else
-                    const Icon(Icons.emoji_emotions, size: 20),
+                    const Icon(Symbols.emoji_emotions_rounded, size: 20),
                   const SizedBox(width: 8),
                   Text(
                     context.l10n.userProfile_reacted,
@@ -2205,15 +2203,15 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage>
   IconData _getActionIcon(int? type) {
     switch (type) {
       case UserActionType.like:
-        return Icons.favorite_rounded;
+        return Symbols.favorite_rounded;
       case UserActionType.wasLiked:
-        return Icons.favorite_border_rounded;
+        return Symbols.favorite_border_rounded;
       case UserActionType.newTopic:
-        return Icons.article_rounded;
+        return Symbols.article_rounded;
       case UserActionType.reply:
-        return Icons.chat_bubble_rounded;
+        return Symbols.chat_bubble_rounded;
       default:
-        return Icons.history_rounded;
+        return Symbols.history_rounded;
     }
   }
 

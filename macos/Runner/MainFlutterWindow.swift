@@ -35,6 +35,22 @@ class MainFlutterWindow: NSWindow {
       }
     }
 
+    // 系统信息 channel：读取本机 Safari 版本号，用于补齐 UA
+    // 真实 Safari UA 形如 "... Version/{x.y} Safari/605.1.15"，
+    // WKWebView 默认 UA 缺这两段，CF 会判为半截 UA。
+    let systemInfoChannel = FlutterMethodChannel(
+      name: "com.fluxdo/system_info",
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
+    systemInfoChannel.setMethodCallHandler { (call, result) in
+      switch call.method {
+      case "getSafariVersion":
+        result(MainFlutterWindow.readSafariVersion())
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
     // 注册代理 CA 证书 channel（原生层 SSL challenge 拦截）
     let proxyCertChannel = FlutterMethodChannel(
       name: "com.fluxdo/proxy_cert",
@@ -94,10 +110,17 @@ class MainFlutterWindow: NSWindow {
           result(false)
           return
         }
-        // 同时写入 HTTPCookieStorage.shared，配合 sharedCookiesEnabled
-        // 确保 WKWebView 在创建时即可从 shared storage 读取到 cookie
+
+        let writeSharedStorage = args["writeSharedStorage"] as? Bool ?? true
         CookieStoreObserverHandler.shared.beginInternalWrite()
-        HTTPCookieStorage.shared.setCookie(cookie)
+        let storage = HTTPCookieStorage.shared
+        if writeSharedStorage {
+          // 同时写入 HTTPCookieStorage.shared，配合 sharedCookiesEnabled
+          // 确保 WKWebView 在创建时即可从 shared storage 读取到 cookie。
+          storage.setCookie(cookie)
+        } else {
+          MainFlutterWindow.deleteSharedCookieApple(storage: storage, url: url, cookie: cookie)
+        }
         let store = WKWebsiteDataStore.default().httpCookieStore
         store.setCookie(cookie) {
           CookieStoreObserverHandler.shared.endInternalWrite()
@@ -174,6 +197,28 @@ class MainFlutterWindow: NSWindow {
     super.awakeFromNib()
   }
 
+  // MARK: - 系统信息
+
+  /// 读取本机 Safari 的版本号（CFBundleShortVersionString）。
+  /// 用户可能装在 /Applications 之外，按常见路径依次尝试；都拿不到返回 nil。
+  private static func readSafariVersion() -> String? {
+    let candidates = [
+      "/Applications/Safari.app",
+      "/System/Applications/Safari.app",
+      "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app",
+    ]
+    for path in candidates {
+      let plistPath = "\(path)/Contents/Info.plist"
+      guard let dict = NSDictionary(contentsOfFile: plistPath),
+            let version = dict["CFBundleShortVersionString"] as? String,
+            !version.isEmpty else {
+        continue
+      }
+      return version
+    }
+    return nil
+  }
+
   // MARK: - Cookie 引擎 v0.4.0 原语 (Apple 平台共享实现)
 
   /// 把 HTTPCookie.sameSitePolicy 转成 Dart 端可识别的字符串 ("Lax"/"Strict"/"None")。
@@ -214,6 +259,21 @@ class MainFlutterWindow: NSWindow {
     }
   }
 
+  private static func deleteSharedCookieApple(
+    storage: HTTPCookieStorage,
+    url: URL,
+    cookie: HTTPCookie
+  ) {
+    let host = (url.host ?? "").lowercased()
+    guard let sharedCookies = storage.cookies else { return }
+    for sharedCookie in sharedCookies where
+      sharedCookie.name == cookie.name &&
+      sharedCookie.path == cookie.path &&
+      MainFlutterWindow.matchDomain(cookieDomain: sharedCookie.domain, candidate: cookie.domain, host: host) {
+      storage.deleteCookie(sharedCookie)
+    }
+  }
+
   private static func nukeAllVariantsApple(
     url: URL,
     name: String,
@@ -225,13 +285,14 @@ class MainFlutterWindow: NSWindow {
     let host = (url.host ?? "").lowercased()
 
     store.getAllCookies { cookies in
+      // 枚举真实 cookie 对象，按 name + 适用域过滤（与 countCookiesByNameApple 对齐），
+      // 逐个 delete 真实对象，不再用 domainCandidates/pathCandidates 猜测。
       let matching = cookies.filter { cookie in
         guard cookie.name == name else { return false }
-        let domainMatch = domainCandidates.contains { candidate in
-          MainFlutterWindow.matchDomain(cookieDomain: cookie.domain, candidate: candidate, host: host)
-        }
-        let pathMatch = pathCandidates.contains(cookie.path)
-        return domainMatch && pathMatch
+        let cookieDomain = (cookie.domain.hasPrefix(".")
+          ? String(cookie.domain.dropFirst())
+          : cookie.domain).lowercased()
+        return host == cookieDomain || host.hasSuffix("." + cookieDomain)
       }
 
       CookieStoreObserverHandler.shared.beginInternalWrite()
@@ -252,11 +313,10 @@ class MainFlutterWindow: NSWindow {
       let storage = HTTPCookieStorage.shared
       if let sharedCookies = storage.cookies {
         for cookie in sharedCookies where cookie.name == name {
-          let domainMatch = domainCandidates.contains { candidate in
-            MainFlutterWindow.matchDomain(cookieDomain: cookie.domain, candidate: candidate, host: host)
-          }
-          let pathMatch = pathCandidates.contains(cookie.path)
-          if domainMatch && pathMatch {
+          let cookieDomain = (cookie.domain.hasPrefix(".")
+            ? String(cookie.domain.dropFirst())
+            : cookie.domain).lowercased()
+          if host == cookieDomain || host.hasSuffix("." + cookieDomain) {
             storage.deleteCookie(cookie)
           }
         }

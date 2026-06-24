@@ -17,7 +17,6 @@ import 'providers/locale_provider.dart';
 import 'widgets/ai/builtin_presets_factory.dart';
 import 'providers/message_bus_providers.dart';
 import 'services/auth_issue_notice_service.dart';
-import 'services/discourse/discourse_service.dart';
 import 'providers/app_state_refresher.dart';
 import 'services/highlighter_service.dart';
 import 'widgets/common/notification_icon_button.dart';
@@ -28,7 +27,6 @@ import 'services/network/cookie/csrf_token_service.dart';
 import 'services/network/cookie/cookie_devtools_extension.dart';
 import 'services/network/cookie/cookie_jar_service.dart';
 import 'services/network/cookie/cookie_store_observer.dart';
-import 'services/network/cookie/webview_cookie_priming.dart';
 import 'services/network/adapters/cronet_fallback_service.dart';
 import 'services/local_notification_service.dart';
 import 'services/data_management/cache_size_service.dart';
@@ -37,7 +35,6 @@ import 'services/toast_service.dart';
 import 'widgets/common/loading_spinner.dart';
 import 'l10n/s.dart';
 
-import 'services/preloaded_data_service.dart';
 import 'services/network/doh/network_settings_service.dart';
 import 'services/network/proxy/proxy_settings_service.dart';
 import 'services/network/rhttp/rhttp_settings_service.dart';
@@ -47,7 +44,7 @@ import 'package:rhttp/rhttp.dart' as rhttp;
 import 'services/network/vpn_auto_toggle_service.dart';
 import 'services/network/doh_proxy/proxy_certificate.dart';
 import 'services/cf_challenge_logger.dart';
-import 'services/cf_clearance_refresh_service.dart';
+import 'services/browser_trust_coordinator.dart';
 import 'services/update_service.dart';
 import 'services/update_checker_helper.dart';
 import 'services/clipboard_topic_link_service.dart';
@@ -56,14 +53,15 @@ import 'services/background/background_notification_service.dart';
 import 'services/message_bus_service.dart';
 import 'services/connectivity_service.dart';
 import 'services/log/json_file_handler.dart';
+import 'services/log/filtered_catcher_logger.dart';
 import 'services/log/log_writer.dart';
-import 'services/log/logger_utils.dart';
 import 'services/download_service.dart';
 import 'services/migration_service.dart';
 import 'services/navigation/app_route_observer.dart';
 import 'services/window_state_service.dart';
 import 'services/webview_settings.dart';
 import 'services/windows_webview_environment_service.dart';
+import 'services/user_presence_service.dart';
 import 'models/user.dart';
 import 'constants.dart';
 import 'providers/connectivity_provider.dart';
@@ -130,15 +128,25 @@ Future<void> _applyAndroidDisplayMode(SharedPreferences prefs) async {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Release 模式下禁用 debugPrint 输出：全项目有数百处 debugPrint 调试输出，
+  // 它们在 release 下默认仍会写 logcat/console，徒增 I/O 开销。
+  // 需要持久化的日志统一走 AppLogger（落盘到统一 JSONL）。
+  if (kReleaseMode) {
+    debugPrint = (String? message, {int? wrapWidth}) {};
+  }
+
   // Flutter ImageCache 默认 100 MB / 1000 项。两个上限任一超过就 LRU evict。
   //
   // sticker / emoji 场景非常吃缓存:用户订阅 10+ 个表情包 group(每 group
   // 100-300 张)+ Discourse 自带几千个 emoji + 头像 + 贴内图,加起来很容易
   // 超过 5000 项,触发 LRU evict 后滚回去就要重新解码,用户感知卡顿。
   //
-  // 800 MB / 30000 项:一张 160 thumbnail ≈ 100 KB,理论 30000 项 ≈ 3 GB,
-  // 但 size 限 800 MB 兜底,实际占用通常 200-500 MB。对 4 GB+ RAM 手机 OK。
-  PaintingBinding.instance.imageCache.maximumSizeBytes = 800 * 1024 * 1024;
+  // 256 MB / 30000 项:emoji thumbnail(64px)~16 KB、sticker thumbnail
+  // (160px)~100 KB,256 MB 足够装下"全部 emoji + 几个 sticker group +
+  // 当前贴图"。之前调过 800 MB,但中端 Android 机上内存压力换来系统级
+  // GC / LMK 卡顿,得不偿失 —— 磁盘 PNG 缩略图缓存命中本来就是毫秒级,
+  // evict 的重解成本远比内存压力的代价低。
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 256 * 1024 * 1024;
   PaintingBinding.instance.imageCache.maximumSize = 30000;
 
   // 启用 Edge-to-Edge 模式（小白条沉浸式）
@@ -209,12 +217,21 @@ Future<void> main() async {
         await windowManager.focus();
       }
     } else {
-      await windowManager.waitUntilReadyToShow(null, () async {
-        await WindowStateService.instance.restore(prefs);
-        if (Platform.isLinux) {
-          await windowManager.focus();
-        }
-      });
+      // 冷启动：窗口保持隐藏，推迟到 Flutter 首帧光栅化后再恢复位置并显示，
+      // 避免 main() 后续初始化（迁移/网络栈/rhttp 等）期间露出空白窗口。
+      // Future.any 兜底：极端情况下首帧迟迟未到时也要把窗口显示出来。
+      unawaited(() async {
+        await Future.any([
+          WidgetsBinding.instance.waitUntilFirstFrameRasterized,
+          Future.delayed(const Duration(seconds: 3)),
+        ]);
+        await windowManager.waitUntilReadyToShow(null, () async {
+          await WindowStateService.instance.restore(prefs);
+          if (Platform.isLinux) {
+            await windowManager.focus();
+          }
+        });
+      }());
     }
   }
 
@@ -223,8 +240,11 @@ Future<void> main() async {
 
   // 阶段 2：依赖 prefs 的步骤并行
   final crashlyticsEnabled = prefs.getBool('pref_crashlytics') ?? true;
+  final developerMode = prefs.getBool('developer_mode') ?? false;
+  CfChallengeLogger.setEnabled(developerMode);
+  // 开发者模式下 debug 级日志落盘（高频追踪信息）
+  AppLogger.setVerbose(developerMode);
   await Future.wait([
-    CfChallengeLogger.setEnabled(prefs.getBool('developer_mode') ?? false),
     CronetFallbackService.instance.initialize(prefs),
     ProxySettingsService.instance.initialize(prefs),
     if (Platform.isAndroid)
@@ -238,15 +258,8 @@ Future<void> main() async {
   await WebViewAdapterSettingsService.instance.initialize(prefs);
   // Eruda 调试控制台开关 (默认关)
   await ErudaSettingsService.instance.initialize(prefs);
-  // v0.4.0: 启动时执行 WV cookie 重灌 (取代 RawSetCookieQueue + 启动自检)
-  unawaited(
-    WebViewCookiePriming.instance.prime(AppConstants.baseUrl).catchError((
-      Object e,
-      StackTrace _,
-    ) {
-      debugPrint('[Main] WebView cookie priming 失败: $e');
-    }),
-  );
+  // 启动期浏览器信任准备由 BrowserTrustCoordinator 统一编排。
+  BrowserTrustCoordinator.instance.prepareStartup(reason: 'startup');
   try {
     final rhttp = await Future.any([
       _initRhttp(),
@@ -263,7 +276,6 @@ Future<void> main() async {
 
   await NetworkSettingsService.instance.initialize(prefs);
   VpnAutoToggleService.instance.initialize(prefs);
-  CfClearanceRefreshService().initialize(prefs);
   try {
     final initialConnectivity =
         await ConnectivityService.safeCheckConnectivity();
@@ -301,9 +313,13 @@ Future<void> main() async {
     unawaited(_applyAndroidDisplayMode(prefs));
   }
 
-  // 提前触发预加载数据请求，与 runApp 并行执行
-  // PreheatGate 中的 ensureLoaded() 会复用这个已在进行的请求
-  unawaited(PreloadedDataService().ensureLoaded().catchError((Object _) {}));
+  // 提前触发预加载数据请求，与 runApp 并行执行。
+  // PreheatGate 中的 ensurePreloaded() 会复用这个已在进行的请求。
+  unawaited(
+    BrowserTrustCoordinator.instance
+        .ensurePreloaded(reason: 'startup')
+        .catchError((Object _) {}),
+  );
 
   // 记录应用启动日志
   LogWriter.instance.write({
@@ -313,9 +329,6 @@ Future<void> main() async {
     'event': 'app_start',
     'message': '应用启动',
   });
-
-  // 清理过期日志（14 天前）
-  LoggerUtils.cleanExpiredLogs().ignore();
 
   // 注入 AI 模型管理包的消息提示实现
   AiToastDelegate.configure((message, {type = AiToastType.info}) {
@@ -366,12 +379,14 @@ Future<void> main() async {
     [ConsoleHandler(), JsonFileHandler()],
     handlerTimeout: 10000,
     filterFunction: filterKnownFrameworkBugs,
+    logger: FilteredCatcherLogger(),
   );
   final releaseConfig = Catcher2Options(
     SilentReportMode(),
     [JsonFileHandler()],
     handlerTimeout: 10000,
     filterFunction: filterKnownFrameworkBugs,
+    logger: FilteredCatcherLogger(),
   );
 
   // 把 ai_model_manager 包内的诊断日志桥接到主应用 AppLogger,
@@ -427,6 +442,17 @@ ThemeData _withChineseFallback(ThemeData base) {
     primaryTextTheme: base.primaryTextTheme.apply(fontFamilyFallback: fallback),
   );
 }
+
+/// Material Symbols 全局轴默认：fill=0 走线框，weight/grade/opticalSize
+/// 给出与现有视觉匹配的中性值。状态类图标需在使用处显式传 `fill: 1`。
+IconThemeData _appIconTheme(Color color) => IconThemeData(
+  color: color,
+  size: 24,
+  fill: 0,
+  weight: 400,
+  grade: 0,
+  opticalSize: 24,
+);
 
 class MainApp extends ConsumerWidget {
   const MainApp({super.key});
@@ -499,6 +525,8 @@ class MainApp extends ConsumerWidget {
                   colorScheme: lightScheme,
                   useMaterial3: true,
                   fontFamily: themeState.fontFamilyName,
+                  iconTheme: _appIconTheme(lightScheme.onSurface),
+                  primaryIconTheme: _appIconTheme(lightScheme.onPrimary),
                   cardTheme: CardThemeData(
                     elevation: 0,
                     shape: RoundedRectangleBorder(
@@ -507,6 +535,15 @@ class MainApp extends ConsumerWidget {
                     color: lightScheme.surfaceContainerLow,
                     margin: EdgeInsets.zero,
                   ),
+                  popupMenuTheme: PopupMenuThemeData(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    elevation: 3,
+                    color: lightScheme.surfaceContainerLow,
+                    surfaceTintColor: Colors.transparent,
+                    menuPadding: const EdgeInsets.symmetric(vertical: 8),
+                  ),
                 ),
               ),
               darkTheme: _withChineseFallback(
@@ -514,6 +551,8 @@ class MainApp extends ConsumerWidget {
                   colorScheme: darkScheme,
                   useMaterial3: true,
                   fontFamily: themeState.fontFamilyName,
+                  iconTheme: _appIconTheme(darkScheme.onSurface),
+                  primaryIconTheme: _appIconTheme(darkScheme.onPrimary),
                   cardTheme: CardThemeData(
                     elevation: 0,
                     shape: RoundedRectangleBorder(
@@ -521,6 +560,15 @@ class MainApp extends ConsumerWidget {
                     ),
                     color: darkScheme.surfaceContainerLow,
                     margin: EdgeInsets.zero,
+                  ),
+                  popupMenuTheme: PopupMenuThemeData(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    elevation: 3,
+                    color: darkScheme.surfaceContainerLow,
+                    surfaceTintColor: Colors.transparent,
+                    menuPadding: const EdgeInsets.symmetric(vertical: 8),
                   ),
                 ),
               ),
@@ -564,19 +612,27 @@ class MainApp extends ConsumerWidget {
                   ),
                 );
 
-                // 桌面端：全局鼠标返回键 + 键盘快捷键（HardwareKeyboard）
+                result = Listener(
+                  behavior: HitTestBehavior.translucent,
+                  onPointerDown: (event) {
+                    UserPresenceService().markUserActivity();
+                    // 鼠标侧键返回（第 4 按钮，bit flag 0x08）
+                    if (PlatformUtils.isDesktop && event.buttons & 0x08 != 0) {
+                      navigatorKey.currentState?.maybePop();
+                    }
+                  },
+                  onPointerMove: (_) =>
+                      UserPresenceService().markUserActivity(),
+                  onPointerSignal: (_) =>
+                      UserPresenceService().markUserActivity(),
+                  child: result,
+                );
+
+                // 桌面端：全局键盘快捷键（HardwareKeyboard）
                 if (PlatformUtils.isDesktop) {
-                  result = Listener(
-                    onPointerDown: (event) {
-                      // 鼠标侧键返回（第 4 按钮，bit flag 0x08）
-                      if (event.buttons & 0x08 != 0) {
-                        navigatorKey.currentState?.maybePop();
-                      }
-                    },
-                    child: KeyboardShortcutHandler(
-                      navigatorKey: navigatorKey,
-                      child: result,
-                    ),
+                  result = KeyboardShortcutHandler(
+                    navigatorKey: navigatorKey,
+                    child: result,
                   );
                 }
 
@@ -636,6 +692,8 @@ class _MainPageState extends ConsumerState<MainPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    UserPresenceService().setForeground(true, countAsActivity: true);
+    HardwareKeyboard.instance.addHandler(_handlePresenceKeyEvent);
     if (Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
       WindowStateService.instance.startListening();
     }
@@ -644,8 +702,7 @@ class _MainPageState extends ConsumerState<MainPage>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // 标记应用已就绪（MainPage 在 PreheatGate 之后才挂载）
       ref.read(appReadyProvider.notifier).state = true;
-      DiscourseService().setNavigatorContext(context);
-      PreloadedDataService().setNavigatorContext(context);
+      BrowserTrustCoordinator.instance.setNavigatorContext(context);
 
       // 初始化 Deep Link 服务
       DeepLinkService.instance.initialize(context);
@@ -685,16 +742,25 @@ class _MainPageState extends ConsumerState<MainPage>
       next,
     ) {
       next.whenData((_) {
-        if (mounted) {
-          AppStateRefresher.refreshAll(ref);
-        }
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          AppStateRefresher.refreshAll(
+            ProviderScope.containerOf(context, listen: false),
+          );
+        });
       });
     });
     _currentUserSub = ref.listenManual<AsyncValue<User?>>(currentUserProvider, (
-      _,
+      previous,
       next,
     ) {
+      final previousUser = previous?.value;
       final user = next.value;
+      if (previousUser == null && user != null) {
+        BrowserTrustCoordinator.instance.startClearanceRefresh(
+          reason: 'current_user_ready',
+        );
+      }
       if (user != null && !_messageBusInitialized) {
         _messageBusInitialized = true;
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -874,6 +940,7 @@ class _MainPageState extends ConsumerState<MainPage>
     if (Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
       WindowStateService.instance.stopListening();
     }
+    HardwareKeyboard.instance.removeHandler(_handlePresenceKeyEvent);
     WidgetsBinding.instance.removeObserver(this);
     _resumeDebounceTimer?.cancel();
     _pendingSingleTap?.cancel();
@@ -891,32 +958,62 @@ class _MainPageState extends ConsumerState<MainPage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
 
+    if (state == AppLifecycleState.resumed) {
+      UserPresenceService().setForeground(true, countAsActivity: true);
+    } else if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      UserPresenceService().setForeground(false);
+    }
+
     if (state == AppLifecycleState.hidden) {
       // hidden 比 paused 更早触发，在系统挂起 Dart isolate 之前启动前台服务
       // 取消待执行的 resume 操作（防止配置变更等假 resume）
       _resumeDebounceTimer?.cancel();
       _resumeDebounceTimer = null;
       _enterBackground();
-      CfClearanceRefreshService().pause();
+      BrowserTrustCoordinator.instance.pauseForBackground();
     } else if (state == AppLifecycleState.resumed) {
       // 延迟执行，避免系统配置变更（主题切换等）触发的假 resume
       _resumeDebounceTimer?.cancel();
       _resumeDebounceTimer = Timer(const Duration(milliseconds: 500), () {
         if (!mounted) return;
         _resumeDebounceTimer = null;
-        // App 回到前台 — 停止后台保活 + 恢复所有频道 + 刷新通知
-        BackgroundNotificationService().disable();
-        MessageBusService().exitBackgroundMode();
-        ref.invalidate(notificationListProvider);
-        // 检查 DOH 代理是否在后台期间失效，若失效则自动重启
-        NetworkSettingsService.instance.ensureProxyAlive();
-        // 回到前台时主动检查连通性（等同 Discourse 的 visibilitychange）
-        ConnectivityService().check();
-        // 恢复 cf_clearance 自动续期监控
-        CfClearanceRefreshService().resume();
-        _checkClipboardTopicLink();
+        unawaited(_resumeFromBackground());
       });
     }
+  }
+
+  Future<void> _resumeFromBackground() async {
+    // App 回到前台 — 停止后台保活 + 恢复所有频道 + 刷新通知。
+    try {
+      await BackgroundNotificationService().disable();
+      MessageBusService().exitBackgroundMode();
+      if (Platform.isIOS) {
+        // iOS 后台轮询任务在独立 isolate 写 cookie 文件，回前台时重载
+        // 磁盘值，避免主 isolate 用旧缓存覆盖后台轮换的 token
+        CookieJarService().reloadPersistedCookies();
+      }
+      if (!mounted) return;
+      ref.invalidate(notificationListProvider);
+      // 检查 DOH 代理是否在后台期间失效，若失效则自动重启
+      NetworkSettingsService.instance.ensureProxyAlive();
+      // 回到前台时主动检查连通性（等同 Discourse 的 visibilitychange）
+      unawaited(ConnectivityService().check());
+      unawaited(_checkClipboardTopicLink());
+    } catch (e) {
+      debugPrint('[MainPage] 恢复前台失败: $e');
+    } finally {
+      BrowserTrustCoordinator.instance.resumeFromBackground(reason: 'resume');
+    }
+  }
+
+  bool _handlePresenceKeyEvent(KeyEvent event) {
+    if (event is KeyDownEvent || event is KeyRepeatEvent) {
+      UserPresenceService().markUserActivity();
+    }
+    return false;
   }
 
   Future<void> _checkClipboardTopicLink() async {
@@ -1022,7 +1119,9 @@ class _MainPageState extends ConsumerState<MainPage>
     );
 
     if (mounted) {
-      await AppStateRefresher.resetForLogout(ref);
+      await AppStateRefresher.resetForLogout(
+        ProviderScope.containerOf(context, listen: false),
+      );
     }
     if (mounted) {
       setState(() => _currentIndex = 0);
@@ -1098,7 +1197,8 @@ class _MainPageState extends ConsumerState<MainPage>
               : Icon(e.iconData),
           selectedIcon: e.customSelectedIconBuilder != null
               ? e.customSelectedIconBuilder!(context, ref)
-              : Icon(e.selectedIconData),
+              // 同一 IconData 用 fill:1 表达选中态，避免不同字形错位
+              : Icon(e.selectedIconData, fill: 1),
           label: e.label(context),
         ),
     ];

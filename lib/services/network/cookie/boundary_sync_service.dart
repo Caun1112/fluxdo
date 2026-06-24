@@ -1,5 +1,6 @@
 import 'dart:io' as io;
 
+import 'package:enhanced_cookie_jar/enhanced_cookie_jar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
@@ -22,16 +23,68 @@ class BoundarySyncService {
   final CookieJarService _jar = CookieJarService();
   final PlatformCookieStrategy _strategy = PlatformCookieStrategy.create();
 
+  /// 从 WebView 读取一个 cookie 值，但不写入 CookieJar。
+  ///
+  /// 用于 auth 恢复时把 WebView session 当作候选值先验证，避免未验证的
+  /// session cookie 覆盖 native canonical cookie。
+  Future<String?> readCookieValueFromWebView({
+    String? currentUrl,
+    InAppWebViewController? controller,
+    required String name,
+    bool allowLowConfidenceSessionCookies = false,
+  }) async {
+    final url = currentUrl ?? AppConstants.baseUrl;
+    final uri = Uri.parse(url);
+    final host = uri.host;
+
+    if (io.Platform.isWindows && controller != null) {
+      return _jar.readCookieValueFromController(
+        controller,
+        name,
+        currentUrl: url,
+      );
+    }
+
+    final webViewCookies = await _strategy.readCookiesFromWebView(
+      _jar.webViewCookieManager,
+      url,
+    );
+    final matches = <Cookie>[];
+    for (final cookie in webViewCookies) {
+      final value = cookie.value?.toString() ?? '';
+      if (cookie.name != name || value.isEmpty) continue;
+      if (CookieJarService.sessionCookieNames.contains(cookie.name) &&
+          _isLowConfidenceWebViewCookie(cookie) &&
+          !allowLowConfidenceSessionCookies) {
+        continue;
+      }
+      matches.add(cookie);
+    }
+    if (matches.isEmpty) return null;
+
+    final selected = CookieJarService.sessionCookieNames.contains(name)
+        ? _selectBestSessionCookie(matches, host)
+        : matches.first;
+    return selected?.value?.toString();
+  }
+
   /// 从 WebView 读 cookie 写入 jar。
   ///
   /// [currentUrl] 当前页面 URL，用于确定读取哪个域名的 cookie。
   /// [cookieNames] 只同步指定的 cookie 名；null 表示同步所有。
+  /// [excludeCookieNames] 排除指定 cookie；用于 CF/预登录流程避免写回 session。
+  /// [trusted] 标记为权威写入（CF challenge 确认后），让写入升 version 盖过旧值。
+  /// [acceptValues] cookie 名 → 只接受的值；用于 challenge 场景按确认的 fresh 值
+  ///   过滤，排除 WebView 中可能残留的旧变体。
   Future<void> syncFromWebView({
     String? currentUrl,
     InAppWebViewController? controller,
     Set<String>? cookieNames,
+    Set<String>? excludeCookieNames,
     bool allowLowConfidenceSessionCookies = false,
     int? requestGeneration,
+    bool trusted = false,
+    Map<String, String>? acceptValues,
   }) async {
     final url = currentUrl ?? AppConstants.baseUrl;
     final uri = Uri.parse(url);
@@ -52,6 +105,9 @@ class BoundarySyncService {
           controller,
           currentUrl: url,
           cookieNames: cookieNames,
+          excludeCookieNames: excludeCookieNames,
+          trusted: trusted,
+          acceptValues: acceptValues,
         );
         if (synced > 0) {
           final syncedDetails = await _jar.getCookieDiagnosticsForRequest(
@@ -76,33 +132,40 @@ class BoundarySyncService {
         url,
       );
       final cookiesToPersist = <Cookie>[];
-      final sessionCookieGroups = <String, List<Cookie>>{};
+      final cookieGroups = <String, List<Cookie>>{};
 
       for (final wc in webViewCookies) {
         final value = wc.value?.toString() ?? '';
         if (value.isEmpty) continue;
         if (cookieNames != null && !cookieNames.contains(wc.name)) continue;
-
-        final isSessionCookie =
-            CookieJarService.sessionCookieNames.contains(wc.name);
-        if (isSessionCookie) {
-          sessionCookieGroups.putIfAbsent(wc.name, () => <Cookie>[]).add(wc);
-        } else {
-          cookiesToPersist.add(wc);
+        if (excludeCookieNames != null &&
+            excludeCookieNames.contains(wc.name)) {
+          continue;
         }
+        // challenge 场景：只接受确认的 fresh 值，排除 WebView 残留的旧变体。
+        final onlyValue = acceptValues?[wc.name];
+        if (onlyValue != null && value != onlyValue) continue;
+
+        cookieGroups.putIfAbsent(wc.name, () => <Cookie>[]).add(wc);
       }
 
-      for (final entry in sessionCookieGroups.entries) {
-        final selected = _selectBestSessionCookie(entry.value, host);
+      for (final entry in cookieGroups.entries) {
+        final isSessionCookie = CookieJarService.sessionCookieNames.contains(
+          entry.key,
+        );
+        final selected = isSessionCookie
+            ? _selectBestSessionCookie(entry.value, host)
+            : await _selectBestWebViewCookie(entry.key, entry.value, host);
         if (selected == null) continue;
 
         if (entry.value.length > 1) {
-          _logDuplicateSessionCookies(
+          _logDuplicateWebViewCookies(
             url: url,
             host: host,
             name: entry.key,
             cookies: entry.value,
             selected: selected,
+            isSessionCookie: isSessionCookie,
           );
         }
         cookiesToPersist.add(selected);
@@ -113,23 +176,24 @@ class BoundarySyncService {
 
       for (final wc in cookiesToPersist) {
         final value = wc.value?.toString() ?? '';
-        final isSessionCookie =
-            CookieJarService.sessionCookieNames.contains(wc.name);
+        final isSessionCookie = CookieJarService.sessionCookieNames.contains(
+          wc.name,
+        );
+        final isHostOnlyCookie = CookieJarService.hostOnlyCookieNames.contains(
+          wc.name,
+        );
         final lowConfidenceSnapshot = _isLowConfidenceWebViewCookie(wc);
         if (isSessionCookie &&
             lowConfidenceSnapshot &&
             !allowLowConfidenceSessionCookies) {
-          debugPrint(
-            '[BoundarySync] ${wc.name}: 跳过低置信度会话 Cookie 快照',
-          );
+          debugPrint('[BoundarySync] ${wc.name}: 跳过低置信度会话 Cookie 快照');
           continue;
         }
 
         // domain 处理：优先用平台返回值，旧 Android 兜底
         String? domain;
         final rawDomain = wc.domain?.trim();
-        final shouldForceSessionHostOnly =
-            io.Platform.isAndroid && isSessionCookie;
+        final shouldForceSessionHostOnly = isHostOnlyCookie;
         if (shouldForceSessionHostOnly) {
           domain = null;
           if (rawDomain != null && rawDomain.isNotEmpty) {
@@ -148,8 +212,9 @@ class BoundarySyncService {
           // 会回填裸 host 到 domain 字段, 这里必须当 host-only 处理,
           // 否则 _t 等会话 cookie 会被写成 domain cookie 挂到子域名上)
           domain = null;
-        } else if (isSessionCookie) {
-          // 会话 Cookie 缺失 domain 时，保持 host-only 语义，不再放大到子域名。
+        } else if (isHostOnlyCookie) {
+          // 主域 host-only Cookie 缺失 domain 时，保持 host-only 语义，
+          // 不再放大到子域名。
           domain = null;
         } else {
           // 旧 Android（GET_COOKIE_INFO 不支持）：domain 为 null
@@ -179,15 +244,28 @@ class BoundarySyncService {
         }
         cookie
           ..path = wc.path ?? '/'
-          ..secure = wc.isSecure ?? (isSessionCookie ? uri.scheme == 'https' : false)
+          ..secure =
+              wc.isSecure ?? (isSessionCookie ? uri.scheme == 'https' : false)
           ..httpOnly =
-              wc.isHttpOnly ?? (isSessionCookie && allowLowConfidenceSessionCookies);
+              wc.isHttpOnly ??
+              (isSessionCookie && allowLowConfidenceSessionCookies);
         if (domain != null && domain.trim().isNotEmpty) {
           cookie.domain = domain;
         }
 
         if (wc.expiresDate != null) {
           cookie.expires = DateTime.fromMillisecondsSinceEpoch(wc.expiresDate!);
+        }
+
+        if (isSessionCookie &&
+            await _isSameSessionCookieAlreadyInJar(
+              name: wc.name,
+              value: value,
+              domain: domain,
+              path: cookie.path ?? '/',
+              requestHost: host,
+            )) {
+          continue;
         }
 
         toSave.add(cookie);
@@ -208,7 +286,22 @@ class BoundarySyncService {
       }
 
       if (!_jar.isInitialized) await _jar.initialize();
-      await _jar.cookieJar.saveFromResponse(uri, toSave);
+      final jar = _jar.cookieJar;
+      if (trusted && jar is EnhancedPersistCookieJar) {
+        await jar.saveFromResponseTrusted(uri, toSave, trusted: true);
+      } else {
+        await jar.saveFromResponse(uri, toSave);
+      }
+      final authNames = toSave
+          .map((cookie) => cookie.name)
+          .where(CookieJarService.hostOnlyCookieNames.contains)
+          .toSet();
+      if (authNames.isNotEmpty) {
+        await _jar.enforceAuthCookiePolicy(
+          reason: 'boundary_sync',
+          names: authNames,
+        );
+      }
       final syncedDetails = await _jar.getCookieDiagnosticsForRequest(
         uri,
         names: toSave.map((cookie) => cookie.name),
@@ -251,8 +344,41 @@ class BoundarySyncService {
     final candidates = [...cookies]
       ..sort((a, b) {
         final scoreDiff =
-            _scoreSessionCookie(b, requestHost) - _scoreSessionCookie(a, requestHost);
+            _scoreSessionCookie(b, requestHost) -
+            _scoreSessionCookie(a, requestHost);
         if (scoreDiff != 0) return scoreDiff;
+
+        final pathDiff = (b.path?.length ?? 1).compareTo(a.path?.length ?? 1);
+        if (pathDiff != 0) return pathDiff;
+
+        return (b.value?.length ?? 0).compareTo(a.value?.length ?? 0);
+      });
+    return candidates.first;
+  }
+
+  Future<Cookie?> _selectBestWebViewCookie(
+    String name,
+    List<Cookie> cookies,
+    String requestHost,
+  ) async {
+    if (cookies.isEmpty) return null;
+    final existing = await _jar.getCanonicalCookie(name);
+    final candidates = [...cookies]
+      ..sort((a, b) {
+        final scoreDiff =
+            _scoreWebViewCookie(b, requestHost, existing?.value) -
+            _scoreWebViewCookie(a, requestHost, existing?.value);
+        if (scoreDiff != 0) return scoreDiff;
+
+        final aExpires = CookieJarService.parseWebViewCookieExpires(
+          a.expiresDate,
+        );
+        final bExpires = CookieJarService.parseWebViewCookieExpires(
+          b.expiresDate,
+        );
+        if (aExpires != null && bExpires != null && aExpires != bExpires) {
+          return bExpires.compareTo(aExpires);
+        }
 
         final pathDiff = (b.path?.length ?? 1).compareTo(a.path?.length ?? 1);
         if (pathDiff != 0) return pathDiff;
@@ -267,13 +393,16 @@ class BoundarySyncService {
     final value = cookie.value?.toString() ?? '';
     if (value.isNotEmpty) score += 100000;
 
-    final expires = CookieJarService.parseWebViewCookieExpires(cookie.expiresDate);
+    final expires = CookieJarService.parseWebViewCookieExpires(
+      cookie.expiresDate,
+    );
     if (expires == null || expires.isAfter(DateTime.now())) {
       score += 50000;
     }
 
-    final normalizedDomain =
-        CookieJarService.normalizeWebViewCookieDomain(cookie.domain);
+    final normalizedDomain = CookieJarService.normalizeWebViewCookieDomain(
+      cookie.domain,
+    );
     if (normalizedDomain == null || normalizedDomain.isEmpty) {
       score += 40000;
     } else if (normalizedDomain == requestHost) {
@@ -291,19 +420,89 @@ class BoundarySyncService {
     return score;
   }
 
-  void _logDuplicateSessionCookies({
+  int _scoreWebViewCookie(
+    Cookie cookie,
+    String requestHost,
+    String? existingValue,
+  ) {
+    var score = 0;
+    final value = cookie.value?.toString() ?? '';
+    if (value.isNotEmpty) score += 100000;
+    if (existingValue != null && value.isNotEmpty && value != existingValue) {
+      score += 1000;
+    }
+
+    final expires = CookieJarService.parseWebViewCookieExpires(
+      cookie.expiresDate,
+    );
+    if (expires == null || expires.isAfter(DateTime.now())) {
+      score += 50000;
+    }
+
+    final normalizedDomain = CookieJarService.normalizeWebViewCookieDomain(
+      cookie.domain,
+    );
+    if (normalizedDomain == requestHost) {
+      score += 30000 + normalizedDomain!.length;
+    } else if (normalizedDomain != null &&
+        requestHost.endsWith('.$normalizedDomain')) {
+      score += 20000 + normalizedDomain.length;
+    } else {
+      score += normalizedDomain?.length ?? 0;
+    }
+
+    if (cookie.isHttpOnly == true) score += 500;
+    if (cookie.isSecure == true) score += 250;
+    score += cookie.path?.length ?? 1;
+    score += value.length;
+    return score;
+  }
+
+  Future<bool> _isSameSessionCookieAlreadyInJar({
+    required String name,
+    required String value,
+    required String? domain,
+    required String path,
+    required String requestHost,
+  }) async {
+    final existing = await _jar.getCanonicalCookie(name);
+    if (existing == null || existing.value != value) return false;
+    if (existing.path != path) return false;
+
+    final nextHostOnly = domain == null || domain.trim().isEmpty;
+    if (existing.hostOnly != nextHostOnly) return false;
+
+    final nextDomain = nextHostOnly
+        ? requestHost.toLowerCase()
+        : CookieJarService.normalizeWebViewCookieDomain(domain);
+    return existing.normalizedDomain == nextDomain;
+  }
+
+  void _logDuplicateWebViewCookies({
     required String url,
     required String host,
     required String name,
     required List<Cookie> cookies,
     required Cookie selected,
+    required bool isSessionCookie,
   }) {
+    final distinctValues = cookies
+        .map((cookie) => cookie.value?.toString() ?? '')
+        .where((value) => value.isNotEmpty)
+        .toSet();
+    final level = isSessionCookie || distinctValues.length > 1
+        ? 'warning'
+        : 'debug';
     LogWriter.instance.write({
       'timestamp': DateTime.now().toIso8601String(),
-      'level': 'warning',
+      'level': level,
       'type': 'cookie_conflict',
-      'event': 'duplicate_session_cookie_from_webview',
-      'message': 'WebView 中检测到重复会话 Cookie，已在边界同步时选优',
+      'event': isSessionCookie
+          ? 'duplicate_session_cookie_from_webview'
+          : 'duplicate_cookie_from_webview',
+      'message': isSessionCookie
+          ? 'WebView 中检测到重复会话 Cookie，已在边界同步时选优'
+          : 'WebView 中检测到重复 Cookie，已在边界同步时选优',
       'url': url,
       'host': host,
       'name': name,
@@ -315,13 +514,15 @@ class BoundarySyncService {
         'valueLength': selected.value?.length ?? 0,
         'httpOnly': selected.isHttpOnly,
         'secure': selected.isSecure,
+        'expiresDate': selected.expiresDate,
       },
       'cookies': cookies
           .map(
             (cookie) => {
               'domain': cookie.domain,
               'path': cookie.path,
-              'hostOnly': cookie.domain == null || cookie.domain!.trim().isEmpty,
+              'hostOnly':
+                  cookie.domain == null || cookie.domain!.trim().isEmpty,
               'valueLength': cookie.value?.length ?? 0,
               'httpOnly': cookie.isHttpOnly,
               'secure': cookie.isSecure,

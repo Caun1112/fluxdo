@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/topic.dart';
 import '../../pages/topic_detail_page/topic_detail_page.dart';
 import '../../providers/discourse_providers.dart';
+import '../common/error_view.dart';
 import '../common/relative_time_text.dart';
 import '../markdown_editor/markdown_renderer.dart';
 import '../../../../../l10n/s.dart';
@@ -49,7 +53,11 @@ class TopicSummaryWidget extends ConsumerWidget {
           ),
           error: (error, stack) => KeyedSubtree(
             key: const ValueKey('error'),
-            child: _buildErrorState(theme, error, ref),
+            child: InlineErrorView(
+              error: error,
+              message: S.current.topic_summaryLoadFailed,
+              onRetry: () => ref.invalidate(topicSummaryProvider(topicId)),
+            ),
           ),
           data: (summary) {
             if (summary == null) {
@@ -97,38 +105,6 @@ class TopicSummaryWidget extends ConsumerWidget {
     );
   }
 
-  Widget _buildErrorState(ThemeData theme, Object error, WidgetRef ref) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.errorContainer.withValues(alpha:0.3),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.error_outline,
-            size: 20,
-            color: theme.colorScheme.error,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              S.current.topic_summaryLoadFailed,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.error,
-              ),
-            ),
-          ),
-          TextButton(
-            onPressed: () => ref.invalidate(topicSummaryProvider(topicId)),
-            child: Text(S.current.common_retry),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildEmptyState(ThemeData theme) {
     return Container(
       padding: const EdgeInsets.all(16),
@@ -139,7 +115,7 @@ class TopicSummaryWidget extends ConsumerWidget {
       child: Row(
         children: [
           Icon(
-            Icons.info_outline,
+            Symbols.info_rounded,
             size: 20,
             color: theme.colorScheme.onSurfaceVariant,
           ),
@@ -178,7 +154,7 @@ class TopicSummaryWidget extends ConsumerWidget {
           Row(
             children: [
               Icon(
-                Icons.auto_awesome,
+                Symbols.auto_awesome_rounded,
                 size: 18,
                 color: theme.colorScheme.primary,
               ),
@@ -191,6 +167,24 @@ class TopicSummaryWidget extends ConsumerWidget {
                 ),
               ),
               const Spacer(),
+              if (summary.isStreaming) ...[
+                const SizedBox(width: 10),
+                SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.8,
+                    color: theme.colorScheme.primary,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  S.current.topic_generatingSummary,
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ] else
               // 过期提示
               if (summary.outdated)
                 Container(
@@ -210,8 +204,9 @@ class TopicSummaryWidget extends ConsumerWidget {
           ),
           const SizedBox(height: 12),
           // 摘要内容（Markdown 渲染）
-          MarkdownBody(
-            data: summary.summarizedText,
+          _StreamingMarkdownBody(
+            text: summary.summarizedText,
+            isStreaming: summary.isStreaming,
             onInternalLinkTap: (linkTopicId, topicSlug, postNumber) {
               if (linkTopicId == topicId && postNumber != null && onJumpToPost != null) {
                 // 当前话题链接 → 跳转到对应帖子
@@ -230,33 +225,35 @@ class TopicSummaryWidget extends ConsumerWidget {
               }
             },
           ),
-          const SizedBox(height: 12),
-          // 底部信息
-          Row(
-            children: [
-              if (summary.updatedAt != null)
-                RelativeTimeText(
-                  dateTime: summary.updatedAt,
-                  displayStyle: TimeDisplayStyle.prefixed,
-                  prefix: S.current.topic_updatedAt,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
+          if (!summary.isStreaming) ...[
+            const SizedBox(height: 12),
+            // 底部信息
+            Row(
+              children: [
+                if (summary.updatedAt != null)
+                  RelativeTimeText(
+                    dateTime: summary.updatedAt,
+                    displayStyle: TimeDisplayStyle.prefixed,
+                    prefix: S.current.topic_updatedAt,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
                   ),
-                ),
-              const Spacer(),
-              // 刷新按钮
-              if (summary.canRegenerate && summary.outdated)
-                TextButton.icon(
-                  onPressed: () => _refreshSummary(ref),
-                  icon: const Icon(Icons.refresh, size: 16),
-                  label: Text(S.current.common_refresh),
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    minimumSize: const Size(0, 32),
+                const Spacer(),
+                // 刷新按钮
+                if (summary.canRegenerate && summary.outdated)
+                  TextButton.icon(
+                    onPressed: () => _refreshSummary(ref),
+                    icon: const Icon(Symbols.refresh_rounded, size: 16),
+                    label: Text(S.current.common_refresh),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(0, 32),
+                    ),
                   ),
-                ),
-            ],
-          ),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -264,6 +261,125 @@ class TopicSummaryWidget extends ConsumerWidget {
 
   void _refreshSummary(WidgetRef ref) {
     ref.invalidate(topicSummaryProvider(topicId));
+  }
+}
+
+/// 将 MessageBus 的分段更新平滑为逐字显示，对齐 Discourse SmoothStreamer。
+class _StreamingMarkdownBody extends StatefulWidget {
+  final String text;
+  final bool isStreaming;
+  final void Function(int topicId, String? topicSlug, int? postNumber)?
+      onInternalLinkTap;
+
+  const _StreamingMarkdownBody({
+    required this.text,
+    required this.isStreaming,
+    this.onInternalLinkTap,
+  });
+
+  @override
+  State<_StreamingMarkdownBody> createState() =>
+      _StreamingMarkdownBodyState();
+}
+
+class _StreamingMarkdownBodyState extends State<_StreamingMarkdownBody> {
+  static const _typingDelay = Duration(milliseconds: 15);
+  static const _cursorDelay = Duration(milliseconds: 450);
+
+  Timer? _typingTimer;
+  Timer? _cursorTimer;
+  String _displayedText = '';
+  bool _cursorVisible = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _displayedText = widget.isStreaming ? '' : widget.text;
+    _syncStreamingState();
+  }
+
+  @override
+  void didUpdateWidget(covariant _StreamingMarkdownBody oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (!widget.text.startsWith(_displayedText)) {
+      _displayedText = widget.isStreaming ? '' : widget.text;
+    }
+    _syncStreamingState();
+  }
+
+  void _syncStreamingState() {
+    if (!widget.isStreaming) {
+      _typingTimer?.cancel();
+      _cursorTimer?.cancel();
+      _typingTimer = null;
+      _cursorTimer = null;
+      _cursorVisible = false;
+      if (_displayedText != widget.text) {
+        _displayedText = widget.text;
+      }
+      return;
+    }
+
+    _cursorTimer ??= Timer.periodic(_cursorDelay, (_) {
+      if (mounted) {
+        setState(() => _cursorVisible = !_cursorVisible);
+      }
+    });
+    _cursorVisible = true;
+    _startTyping();
+  }
+
+  void _startTyping() {
+    if (_typingTimer?.isActive == true ||
+        _displayedText.length >= widget.text.length) {
+      return;
+    }
+
+    _typingTimer = Timer.periodic(_typingDelay, (timer) {
+      if (!mounted || !widget.isStreaming) {
+        timer.cancel();
+        return;
+      }
+
+      final remaining = widget.text.length - _displayedText.length;
+      if (remaining <= 0) {
+        timer.cancel();
+        return;
+      }
+
+      setState(() {
+        var nextLength = _displayedText.length + 1;
+        if (nextLength < widget.text.length) {
+          final currentCodeUnit = widget.text.codeUnitAt(nextLength - 1);
+          final nextCodeUnit = widget.text.codeUnitAt(nextLength);
+          final splitsSurrogatePair = currentCodeUnit >= 0xD800 &&
+              currentCodeUnit <= 0xDBFF &&
+              nextCodeUnit >= 0xDC00 &&
+              nextCodeUnit <= 0xDFFF;
+          if (splitsSurrogatePair) {
+            nextLength++;
+          }
+        }
+        _displayedText = widget.text.substring(0, nextLength);
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _typingTimer?.cancel();
+    _cursorTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cursor = widget.isStreaming && _cursorVisible ? ' ▍' : '';
+    return MarkdownBody(
+      data: '$_displayedText$cursor',
+      onInternalLinkTap: widget.onInternalLinkTap,
+    );
   }
 }
 
@@ -329,7 +445,8 @@ class _CollapsibleTopicSummaryState
         ? ref.watch(topicSummaryProvider(widget.topicId))
         : null;
 
-    final isLoading = summaryAsync?.isLoading == true;
+    final isLoading = summaryAsync?.isLoading == true ||
+        summaryAsync?.value?.isStreaming == true;
     final isOutdated = summaryAsync?.value?.outdated == true;
     final hasCachedSummary = topicDetail?.hasCachedSummary ?? false;
 
@@ -352,7 +469,7 @@ class _CollapsibleTopicSummaryState
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(
-                      Icons.auto_awesome,
+                      Symbols.auto_awesome_rounded,
                       size: 16,
                       color: theme.colorScheme.primary,
                     ),
@@ -371,7 +488,7 @@ class _CollapsibleTopicSummaryState
                       duration: const Duration(milliseconds: 300),
                       curve: Curves.easeOutCubic,
                       child: Icon(
-                        Icons.expand_more,
+                        Symbols.expand_more_rounded,
                         size: 18,
                         color: theme.colorScheme.primary,
                       ),

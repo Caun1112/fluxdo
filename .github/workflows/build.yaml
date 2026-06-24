@@ -8,10 +8,14 @@ on:
 env:
   IS_STABLE: ${{ !contains(github.ref, '-') }}
   FLUTTER_LINUX_VERSION: '3.44.0'
+  ANDROID_NDK_VERSION: '27.3.13750724'
 
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -36,14 +40,34 @@ jobs:
           - platform: macos
             os: macos-latest
             arch: arm64
+            excluded-arch: x86_64
           - platform: macos
-            os: macos-15-intel
+            os: macos-latest
             arch: x86_64
+            excluded-arch: arm64
           - platform: windows
             os: windows-2022
             arch: x86_64
 
     steps:
+      # ubuntu-latest 可用空间仅 ~14GB,Flutter+NDK+Rust 缓存+Gradle 产物会把盘写满,
+      # 先删掉本构建用不到的预装组件,约可腾出 25GB+
+      - name: Free disk space
+        if: startsWith(matrix.platform, 'android')
+        run: |
+          echo "清理前:" && df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android/sdk/ndk \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/share/swift \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          echo "清理后:" && df -h /
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -66,6 +90,13 @@ jobs:
         if: startsWith(matrix.platform, 'android') || matrix.platform == 'macos' || matrix.platform == 'ios' || matrix.platform == 'windows'
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build
+        if: startsWith(matrix.platform, 'android') || matrix.platform == 'macos' || matrix.platform == 'ios' || matrix.platform == 'windows'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core/doh_proxy
+          key: ${{ matrix.platform }}-${{ matrix.arch || matrix.flutter-target }}
+
       - name: Setup iOS Rust targets
         if: matrix.platform == 'ios'
         run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
@@ -85,7 +116,15 @@ jobs:
         if: startsWith(matrix.platform, 'android')
         uses: android-actions/setup-android@v3
         with:
-          packages: 'ndk;25.2.9519653'
+          packages: 'ndk;${{ env.ANDROID_NDK_VERSION }}'
+
+      - name: Configure Android NDK path
+        if: startsWith(matrix.platform, 'android')
+        run: |
+          ndk_path="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          test -d "${ndk_path}"
+          echo "ANDROID_NDK_HOME=${ndk_path}" >> "${GITHUB_ENV}"
+          echo "ANDROID_NDK_ROOT=${ndk_path}" >> "${GITHUB_ENV}"
 
       - name: Setup Android Signing
         if: startsWith(matrix.platform, 'android')
@@ -101,12 +140,35 @@ jobs:
       - name: Build Android
         if: startsWith(matrix.platform, 'android')
         run: |
-          dart tool/flutterw.dart build apk --release --target-platform ${{ matrix.flutter-target }} --dart-define=cronetHttpNoPlay=true
+          dart tool/flutterw.dart build apk --release --target-platform ${{ matrix.flutter-target }} --dart-define=cronetHttpNoPlay=true --split-debug-info=build/symbols
           unzip -l build/app/outputs/flutter-apk/app-release.apk | grep "lib/${{ matrix.arch }}/libdoh_proxy.so"
           cmp -s core/doh_proxy/certs/ca.der android/app/src/main/res/raw/proxy_ca.der
           cmp -s core/doh_proxy/certs/ca.crt assets/certs/proxy_ca.pem
           mkdir -p dist
           mv build/app/outputs/flutter-apk/app-release.apk dist/fluxdo-${{ matrix.arch }}.apk
+
+      - name: Authenticate to Google Cloud
+        if: startsWith(matrix.platform, 'android')
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Upload Dart symbols to Crashlytics
+        if: startsWith(matrix.platform, 'android')
+        run: |
+          npx -y firebase-tools@latest crashlytics:symbols:upload \
+            --app=1:98542877021:android:e555169791c86bb9c950b4 \
+            build/symbols
+
+      - name: Archive Dart symbols
+        if: startsWith(matrix.platform, 'android')
+        uses: actions/upload-artifact@v4
+        with:
+          name: dart-symbols-${{ matrix.arch }}
+          path: build/symbols
+          retention-days: 90
+          if-no-files-found: error
 
       - name: Build iOS
         if: matrix.platform == 'ios'
@@ -126,6 +188,9 @@ jobs:
 
       - name: Build macOS
         if: matrix.platform == 'macos'
+        env:
+          FLUXDO_MACOS_ARCH: ${{ matrix.arch }}
+          FLUTTER_XCODE_EXCLUDED_ARCHS: ${{ matrix.excluded-arch }}
         run: |
           dart tool/flutterw.dart build macos --release
           mkdir -p dist
@@ -133,6 +198,8 @@ jobs:
           test -f "$APP_PATH/Contents/Frameworks/libdoh_proxy.dylib"
           test -f "$APP_PATH/Contents/Resources/native/doh_proxy_bin"
           test -x "$APP_PATH/Contents/Resources/native/doh_proxy_bin"
+          lipo -archs "$APP_PATH/Contents/MacOS/fluxdo" | grep -qw "${{ matrix.arch }}"
+          lipo -archs "$APP_PATH/Contents/Frameworks/libdoh_proxy.dylib" | grep -qw "${{ matrix.arch }}"
 
       - name: Package macOS DMG
         if: matrix.platform == 'macos'
@@ -203,6 +270,12 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core/doh_proxy
+          key: flatpak
 
       - name: Prepare Flatpak source tree
         env:
@@ -325,10 +398,14 @@ jobs:
 
       - name: Extract Flatpak source tree
         run: |
+          echo "解包前:" && df -h /
           rm -rf flatpak/stage/source-tree
           mkdir -p flatpak/stage/source-tree
           tar -xzf .artifacts/flatpak/fluxdo-flatpak-source-tree.tar.gz -C flatpak/stage/source-tree
+          rm -rf .artifacts/flatpak
           ls -la flatpak/stage/source-tree
+          du -sh flatpak/stage/source-tree flatpak/stage/wpe-layer || true
+          echo "解包并清理源包后:" && df -h /
 
       - name: Build Flatpak bundle
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
@@ -515,38 +592,10 @@ jobs:
           # fallback 模式下 plain 文本直接复制 markdown 版本
           cp release_notes.md release_notes.txt
 
-      - name: Wait for telegram-bot-api
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        if: env.TELEGRAM_BOT_TOKEN
-        run: |
-          for i in {1..20}; do
-            if curl -sf "http://localhost:8081/bot${TELEGRAM_BOT_TOKEN}/getMe" > /dev/null; then
-              echo "telegram-bot-api is ready"
-              exit 0
-            fi
-            echo "waiting for telegram-bot-api..."
-            sleep 2
-          done
-          echo "telegram-bot-api not ready"
-          exit 1
-
-      - name: Send Telegram notification
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          VERSION: ${{ steps.version.outputs.VERSION }}
-          IS_PRERELEASE: ${{ contains(github.ref, '-') }}
-          TELEGRAM_API_BASE: http://localhost:8081
-        if: env.TELEGRAM_BOT_TOKEN
-        continue-on-error: true
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-          python release_telegram.py
-
       - name: Append release template
         run: |
+          # TG 通知不带下载表格（安装包直接随消息发文件），先留一份纯 notes 副本
+          cp release_notes.md release_notes_tg.md
           sed 's/VERSION/${{ steps.version.outputs.VERSION }}/g' .github/release_template.md >> release_notes.md
 
       - name: Generate SHA256 checksums
@@ -641,3 +690,37 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./gh-pages-deploy
           keep_files: false
+
+      # TG 通知放在 job 最后：beta 没有 GitHub Release，TG 是唯一发布渠道，
+      # 失败必须让 CI 红（不能 continue-on-error 吞掉）。放最后保证 TG 失败
+      # 不挡 stable 的 Release/AltStore/Pages，且重跑时前面步骤均幂等不会重复发布。
+      # 脚本内部失败会回收已发出的消息，重跑不产生重复。
+      - name: Wait for telegram-bot-api
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        if: env.TELEGRAM_BOT_TOKEN
+        run: |
+          for i in {1..20}; do
+            if curl -sf "http://localhost:8081/bot${TELEGRAM_BOT_TOKEN}/getMe" > /dev/null; then
+              echo "telegram-bot-api is ready"
+              exit 0
+            fi
+            echo "waiting for telegram-bot-api..."
+            sleep 2
+          done
+          echo "telegram-bot-api not ready"
+          exit 1
+
+      - name: Send Telegram notification
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          IS_PRERELEASE: ${{ contains(github.ref, '-') }}
+          TELEGRAM_API_BASE: http://localhost:8081
+          RELEASE_NOTES_FILE: release_notes_tg.md
+        if: env.TELEGRAM_BOT_TOKEN
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          python release_telegram.py

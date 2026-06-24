@@ -58,7 +58,7 @@
   "profile_loadingData": "Loading data...",
   "profile_loggingOut": "Logging out...",
   "profile_loginForMore": "Log in for more features",
-  "profile_loginLinuxDo": "Log in to Linux.do",
+  "profile_loginLinuxDo": "Log in to LINUX.DO",
   "profile_logoutContent": "Are you sure you want to log out?",
   "profile_logoutCurrentAccount": "Log out current account",
   "profile_metaverse": "Metaverse",
@@ -103,6 +103,19 @@
   "userProfile_linkClicks": "{count} clicks",
   "userProfile_location": "Location",
   "userProfile_message": "Message",
+  "userCard_viewProfile": "View profile",
+  "userCard_score": "Score",
+  "userCard_lastPosted": "Last post",
+  "userCard_mute": "Mute",
+  "userCard_ignore": "Ignore",
+  "userCard_referenceTopicTitle": "Re: {title}",
+  "@userCard_referenceTopicTitle": {
+    "placeholders": {
+      "title": {
+        "type": "String"
+      }
+    }
+  },
   "userProfile_moreInfo": "More info",
   "userProfile_mostLiked": "Most liked",
   "userProfile_mostLikedBy": "Most liked by",

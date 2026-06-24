@@ -1,16 +1,18 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import '../../../../l10n/s.dart';
 import '../../../../constants.dart';
 import '../../../../models/topic.dart';
-import '../../../../pages/user_profile_page.dart';
 import '../../../../services/discourse_cache_manager.dart';
 import '../../../../services/emoji_handler.dart';
 import '../../../../utils/url_helper.dart';
 import '../../../common/flair_badge.dart';
 import '../../../common/smart_avatar.dart';
 import '../../../common/avatar_glow.dart';
+import '../../../user/user_card.dart';
 import '../../whisper_indicator.dart';
+import '../../post_boost/boost_danmaku.dart';
 import 'post_granted_badge.dart';
 
 /// 获取 emoji 图片 URL（未加载完成时返回空字符串，由 errorBuilder 处理）
@@ -23,12 +25,14 @@ class PostAvatar extends StatefulWidget {
   final Post post;
   final ThemeData theme;
   final double radius;
+  final int? topicId;
 
   const PostAvatar({
     super.key,
     required this.post,
     required this.theme,
     this.radius = 20,
+    this.topicId,
   });
 
   @override
@@ -36,10 +40,35 @@ class PostAvatar extends StatefulWidget {
 }
 
 class _PostAvatarState extends State<PostAvatar> {
+  final LayerLink _link = LayerLink();
+
+  void _openUserCard() {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final topLeft = box.localToGlobal(Offset.zero);
+    final anchorRect = topLeft & box.size;
+    showUserCard(
+      context: context,
+      anchorRect: anchorRect,
+      layerLink: _link,
+      username: widget.post.username,
+      topicId: widget.topicId,
+      postNumber: widget.post.postNumber,
+      avatarFallbackUrl: widget.post.getAvatarUrl(size: 144),
+      nameFallback: widget.post.name,
+      flairUrl: widget.post.flairUrl,
+      flairName: widget.post.flairName,
+      flairBgColor: widget.post.flairBgColor,
+      flairColor: widget.post.flairColor,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final avatarUrl = widget.post.getAvatarUrl();
-    final glowColor = AppConstants.siteCustomization.matchAvatarGlow(widget.post);
+    final glowColor = AppConstants.siteCustomization.matchAvatarGlow(
+      widget.post,
+    );
 
     Widget avatar = AvatarWithFlair(
       flairSize: widget.radius * 0.85,
@@ -65,11 +94,8 @@ class _PostAvatarState extends State<PostAvatar> {
     }
 
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => UserProfilePage(username: widget.post.username)),
-      ),
-      child: avatar,
+      onTap: _openUserCard,
+      child: CompositedTransformTarget(link: _link, child: avatar),
     );
   }
 }
@@ -84,12 +110,24 @@ class PostHeader extends StatelessWidget {
   final Widget cachedAvatarWidget;
   final ValueNotifier<bool>? isLoadingReplyHistoryNotifier;
   final VoidCallback? onToggleReplyHistory;
+
   /// 自定义回复指示点击回调（用于弹框内滚动跳转，不加载回复历史）
   final VoidCallback? onReplyIndicatorTap;
+
   /// 隐藏回复指示器
   final bool hideReplyIndicator;
-  final Widget Function(BuildContext context, String text, Color backgroundColor, Color textColor) buildCompactBadge;
+  final Widget Function(
+    BuildContext context,
+    String text,
+    Color backgroundColor,
+    Color textColor,
+  )
+  buildCompactBadge;
   final Widget timeAndFloorWidget;
+
+  /// 弹幕开关：null = 不展示；true/false = 当前是否正在显示弹幕
+  final bool? danmakuActive;
+  final VoidCallback? onToggleDanmaku;
 
   const PostHeader({
     super.key,
@@ -105,6 +143,8 @@ class PostHeader extends StatelessWidget {
     this.hideReplyIndicator = false,
     required this.buildCompactBadge,
     required this.timeAndFloorWidget,
+    this.danmakuActive,
+    this.onToggleDanmaku,
   });
 
   @override
@@ -125,7 +165,9 @@ class PostHeader extends StatelessWidget {
                 children: [
                   Flexible(
                     child: Text(
-                      (post.name != null && post.name!.isNotEmpty) ? post.name! : post.username,
+                      (post.name != null && post.name!.isNotEmpty)
+                          ? post.name!
+                          : post.username,
                       style: theme.textTheme.titleSmall?.copyWith(
                         fontWeight: FontWeight.w600,
                         fontSize: 14,
@@ -152,7 +194,9 @@ class PostHeader extends StatelessWidget {
                     Tooltip(
                       message: post.userStatus!.description ?? '',
                       child: Image(
-                        image: emojiImageProvider(_getEmojiUrl(post.userStatus!.emoji!)),
+                        image: emojiImageProvider(
+                          _getEmojiUrl(post.userStatus!.emoji!),
+                        ),
                         width: 16,
                         height: 16,
                         errorBuilder: (_, _, _) => const SizedBox.shrink(),
@@ -161,11 +205,21 @@ class PostHeader extends StatelessWidget {
                   ],
                   if (isTopicOwner && post.postNumber > 1) ...[
                     const SizedBox(width: 4),
-                    buildCompactBadge(context, context.l10n.post_opBadge, theme.colorScheme.primaryContainer, theme.colorScheme.onPrimaryContainer),
+                    buildCompactBadge(
+                      context,
+                      context.l10n.post_opBadge,
+                      theme.colorScheme.primaryContainer,
+                      theme.colorScheme.onPrimaryContainer,
+                    ),
                   ],
                   if (isOwnPost) ...[
                     const SizedBox(width: 4),
-                    buildCompactBadge(context, context.l10n.post_meBadge, theme.colorScheme.tertiaryContainer, theme.colorScheme.onTertiaryContainer),
+                    buildCompactBadge(
+                      context,
+                      context.l10n.post_meBadge,
+                      theme.colorScheme.tertiaryContainer,
+                      theme.colorScheme.onTertiaryContainer,
+                    ),
                   ],
                   if (isWhisper) ...[
                     const SizedBox(width: 8),
@@ -191,13 +245,16 @@ class PostHeader extends StatelessWidget {
                       const SizedBox(width: 6),
                       Flexible(
                         child: () {
-                          final titleBuilder = AppConstants.siteCustomization.matchTitleStyle(post);
+                          final titleBuilder = AppConstants.siteCustomization
+                              .matchTitleStyle(post);
                           return titleBuilder != null
                               ? titleBuilder(post.userTitle!, 11)
                               : Text(
                                   post.userTitle!,
                                   style: theme.textTheme.bodySmall?.copyWith(
-                                    color: theme.colorScheme.primary.withValues(alpha: 0.8),
+                                    color: theme.colorScheme.primary.withValues(
+                                      alpha: 0.8,
+                                    ),
                                     fontSize: 11,
                                   ),
                                   overflow: TextOverflow.ellipsis,
@@ -207,9 +264,12 @@ class PostHeader extends StatelessWidget {
                       ),
                     ],
                     // 帖子头部徽章
-                    if (post.badgesGranted != null && post.badgesGranted!.isNotEmpty) ...[
+                    if (post.badgesGranted != null &&
+                        post.badgesGranted!.isNotEmpty) ...[
                       const SizedBox(width: 4),
-                      ...post.badgesGranted!.map((badge) => PostGrantedBadgeIcon(badge: badge)),
+                      ...post.badgesGranted!.map(
+                        (badge) => PostGrantedBadgeIcon(badge: badge),
+                      ),
                     ],
                   ],
                 ),
@@ -250,14 +310,45 @@ class PostHeader extends StatelessWidget {
             _buildReplyIndicator(theme, showUsername: true),
           const SizedBox(width: 12),
         ],
+        // 弹幕开关：小图标按钮，紧挨时间/楼层
+        if (danmakuActive != null && onToggleDanmaku != null) ...[
+          Tooltip(
+            message: danmakuActive!
+                ? context.l10n.boost_danmakuDismiss
+                : context.l10n.boost_danmakuShow,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onToggleDanmaku,
+              child: Padding(
+                // 扩大点击区域到 ~32dp
+                padding: const EdgeInsets.all(6),
+                child: DanmakuIcon(
+                  color: danmakuActive!
+                      ? theme.colorScheme.primary
+                      : theme.colorScheme.onSurfaceVariant.withValues(
+                          alpha: 0.7,
+                        ),
+                  off: !danmakuActive!,
+                  size: 20,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+        ],
         timeAndFloorWidget,
       ],
     );
   }
 
-  Widget _buildReplyIndicator(ThemeData theme, {bool isLoading = false, bool showUsername = false}) {
+  Widget _buildReplyIndicator(
+    ThemeData theme, {
+    bool isLoading = false,
+    bool showUsername = false,
+  }) {
     final replyToUser = post.replyToUser!;
-    final displayName = (replyToUser.name != null && replyToUser.name!.isNotEmpty)
+    final displayName =
+        (replyToUser.name != null && replyToUser.name!.isNotEmpty)
         ? replyToUser.name!
         : replyToUser.username;
 
@@ -266,27 +357,31 @@ class PostHeader extends StatelessWidget {
       decoration: BoxDecoration(
         color: theme.colorScheme.primary.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: theme.colorScheme.primary.withValues(alpha: 0.1)),
+        border: Border.all(
+          color: theme.colorScheme.primary.withValues(alpha: 0.1),
+        ),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (isLoading)
-            const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2))
+            const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
           else
-            Icon(Icons.reply, size: 14, color: theme.colorScheme.primary),
+            Icon(Symbols.reply_rounded, size: 14, color: theme.colorScheme.primary),
           const SizedBox(width: 6),
-          CircleAvatar(
-            radius: 10,
-            backgroundColor: theme.colorScheme.primaryContainer,
-            backgroundImage: replyToUser.avatarTemplate.isNotEmpty
-                ? discourseImageProvider(
-                    UrlHelper.resolveUrlWithCdn(replyToUser.avatarTemplate.replaceAll('{size}', '40')),
+          SmartAvatar(
+            imageUrl: replyToUser.avatarTemplate.isNotEmpty
+                ? UrlHelper.resolveUrlWithCdn(
+                    replyToUser.avatarTemplate.replaceAll('{size}', '40'),
                   )
                 : null,
-            child: replyToUser.avatarTemplate.isEmpty
-                ? Text(replyToUser.username[0].toUpperCase(), style: const TextStyle(fontSize: 8, fontWeight: FontWeight.w600))
-                : null,
+            radius: 10,
+            backgroundColor: theme.colorScheme.primaryContainer,
+            fallbackText: replyToUser.username,
           ),
           if (showUsername) ...[
             const SizedBox(width: 4),

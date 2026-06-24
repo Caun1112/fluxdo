@@ -22,7 +22,8 @@ class CookieLogger {
     required int valueLength,
     bool replaced = false,
   }) {
-    final msg = '$name, domain=${domain ?? '<null>'}, '
+    final msg =
+        '$name, domain=${domain ?? '<null>'}, '
         'hostOnly=$hostOnly, source=$source, len=$valueLength'
         '${replaced ? ', replaced=true' : ''}';
     debugPrint('[Cookie:Save] $msg');
@@ -68,7 +69,8 @@ class CookieLogger {
     List<Map<String, dynamic>>? cookieDetails,
     Map<String, dynamic>? extraFields,
   }) {
-    final msg = '$direction, count=$count, names=$names'
+    final msg =
+        '$direction, count=$count, names=$names'
         '${url != null ? ', url=$url' : ''}';
     debugPrint('[Cookie:Sync] $msg');
     final entry = <String, dynamic>{
@@ -87,6 +89,7 @@ class CookieLogger {
     if (extraFields != null && extraFields.isNotEmpty) {
       entry.addAll(extraFields);
     }
+    entry['level'] = 'debug';
     LogWriter.instance.write(entry);
   }
 
@@ -104,10 +107,7 @@ class CookieLogger {
   }
 
   /// 队列 flush 到 WebView
-  static void flush({
-    required int queued,
-    required int written,
-  }) {
+  static void flush({required int queued, required int written}) {
     final msg = 'queued=$queued, written=$written';
     debugPrint('[Cookie:Flush] $msg');
     LogWriter.instance.write({
@@ -126,10 +126,7 @@ class CookieLogger {
   // ---------------------------------------------------------------------------
 
   /// cookie 删除
-  static void delete({
-    required String name,
-    required String source,
-  }) {
+  static void delete({required String name, required String source}) {
     debugPrint('[Cookie:Delete] $name, source=$source');
     LogWriter.instance.write({
       'timestamp': DateTime.now().toIso8601String(),
@@ -147,10 +144,7 @@ class CookieLogger {
   // ---------------------------------------------------------------------------
 
   /// cookie 操作错误
-  static void error({
-    required String operation,
-    required String error,
-  }) {
+  static void error({required String operation, required String error}) {
     debugPrint('[Cookie:Error] $operation: $error');
     LogWriter.instance.write({
       'timestamp': DateTime.now().toIso8601String(),
@@ -184,7 +178,8 @@ class CookieLogger {
   }) {
     final level = switch (event) {
       'failed' => 'warning',
-      'noop' => 'debug',
+      // invoked / noop / swept 每次 sweep 都可能产生，记为 debug 仅开发者模式落盘
+      'noop' || 'invoked' || 'swept' => 'debug',
       _ => 'info',
     };
     final msg = 'sweep_$event: $name @ $url';
@@ -217,7 +212,7 @@ class CookieLogger {
     int? primingDurationMs,
     int? totalElapsedMs,
   }) {
-    final level = event == 'triggered' ? 'warning' : 'info';
+    final level = 'debug';
     final msg = 'nuclear_reset_$event @ $url';
     debugPrint('[Cookie:Nuclear] $msg');
     LogWriter.instance.write({
@@ -246,7 +241,7 @@ class CookieLogger {
     final level = switch (event) {
       'failed' => 'warning',
       'invoked' => 'debug',
-      _ => 'info',
+      _ => 'debug',
     };
     final msg = 'priming_$event @ $url';
     debugPrint('[Cookie:Priming] $msg');
@@ -271,6 +266,7 @@ class CookieLogger {
     required String url,
     int? status,
     bool? jarHasValidToken,
+    bool? hasLoggedOutHeader,
     int? attempt,
     int? attemptsUsed,
     String? finalAction,
@@ -290,6 +286,7 @@ class CookieLogger {
       'url': url,
       if (status != null) 'status': status,
       if (jarHasValidToken != null) 'jarHasValidToken': jarHasValidToken,
+      if (hasLoggedOutHeader != null) 'hasLoggedOutHeader': hasLoggedOutHeader,
       if (attempt != null) 'attempt': attempt,
       if (attemptsUsed != null) 'attemptsUsed': attemptsUsed,
       if (finalAction != null) 'finalAction': finalAction,
@@ -302,7 +299,8 @@ class CookieLogger {
     int? consecutiveCount,
     String? currentHolder,
   }) {
-    final msg = 'lock_timeout: $name'
+    final msg =
+        'lock_timeout: $name'
         '${consecutiveCount != null ? ' (consecutive=$consecutiveCount)' : ''}';
     debugPrint('[Cookie:Lock] $msg');
     LogWriter.instance.write({

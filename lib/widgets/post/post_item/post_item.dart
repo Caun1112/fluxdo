@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter/rendering.dart' show SelectedContent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../models/topic.dart';
@@ -8,6 +9,7 @@ import '../../../providers/preferences_provider.dart';
 import '../../../utils/code_selection_context.dart';
 import '../../content/collapsed_html_content.dart';
 import '../../content/discourse_html_content/chunked/chunked_html_content.dart';
+import '../post_boost/boost_danmaku.dart';
 import '../small_action_item.dart';
 import 'quote_selection_helper.dart';
 import 'widgets/post_footer_section/post_footer_section.dart';
@@ -38,9 +40,11 @@ class PostItem extends ConsumerStatefulWidget {
   final bool useReplyDialog;
   final String? topicTitle;
   final bool isPrivateMessageTopic;
+  final bool isPmWithNonHumanUser;
   final VoidCallback? onShowPostDetail;
   final bool hideRepliesButton;
   final String? highlightBoostUsername;
+
   /// OP 帖专属插槽: 仅在 postNumber == 1 时生效, 透传给 PostFooterSection
   final Widget? opTopSlot;
 
@@ -69,6 +73,7 @@ class PostItem extends ConsumerStatefulWidget {
     this.useReplyDialog = false,
     this.topicTitle,
     this.isPrivateMessageTopic = false,
+    this.isPmWithNonHumanUser = false,
     this.onShowPostDetail,
     this.hideRepliesButton = false,
     this.opTopSlot,
@@ -82,6 +87,11 @@ class _PostItemState extends ConsumerState<PostItem> {
   SelectedContent? _lastSelectedContent;
   CodeSelectionContext? _lastCodeSelectionContext;
   late bool _acceptedAnswer;
+  final GlobalKey<PostFooterSectionState> _footerKey =
+      GlobalKey<PostFooterSectionState>();
+
+  /// 帖子级临时关闭弹幕。null = 跟随全局偏好；false = 临时关
+  bool? _danmakuOverride;
 
   @override
   void initState() {
@@ -105,6 +115,23 @@ class _PostItemState extends ConsumerState<PostItem> {
     if (post.postType == PostTypes.smallAction) {
       return SmallActionItem(post: post, selected: widget.selected);
     }
+
+    final danmakuPref = ref.watch(
+      preferencesProvider.select((p) => p.boostDanmaku),
+    );
+    final hasBoosts = post.boosts?.isNotEmpty ?? false;
+    final danmakuActive = danmakuPref && (_danmakuOverride ?? true);
+    final showDanmaku = danmakuActive && hasBoosts;
+    // 仅当全局开关开启且有 boost 时，才展示帖子级 toggle 按钮
+    final showDanmakuToggle = danmakuPref && hasBoosts;
+    // 按 boost 数量决定轨道数：1 条用 1 轨，2-4 用 2 轨，5+ 用 3 轨
+    final boostCount = post.boosts?.length ?? 0;
+    final danmakuTrackCount = boostCount <= 1
+        ? 1
+        : boostCount <= 4
+        ? 2
+        : 3;
+    const danmakuTrackHeight = 36.0;
 
     final isModeratorAction = post.postType == PostTypes.moderatorAction;
     return PostSegmentFrame(
@@ -130,6 +157,13 @@ class _PostItemState extends ConsumerState<PostItem> {
                 showStamp: _acceptedAnswer,
                 padding: EdgeInsets.zero,
                 onJumpToPost: widget.onJumpToPost,
+                onEditWiki: widget.onEdit,
+                danmakuActive: showDanmakuToggle ? showDanmaku : null,
+                onToggleDanmaku: showDanmakuToggle
+                    ? () => setState(() {
+                        _danmakuOverride = !showDanmaku;
+                      })
+                    : null,
               ),
             ),
             const SizedBox(height: 12),
@@ -155,60 +189,88 @@ class _PostItemState extends ConsumerState<PostItem> {
               padding: isModeratorAction
                   ? const EdgeInsets.all(12)
                   : EdgeInsets.zero,
-              child: Listener(
-                behavior: HitTestBehavior.translucent,
-                onPointerDown: (_) =>
-                    CodeSelectionContextTracker.instance.clear(),
-                child: ChunkedHtmlContent(
-                  html: post.cooked,
-                  textStyle: theme.textTheme.bodyMedium?.copyWith(
-                    height: 1.5,
-                    fontSize:
-                        (theme.textTheme.bodyMedium?.fontSize ?? 14) *
-                        ref.watch(preferencesProvider).contentFontScale,
-                  ),
-                  linkCounts: post.linkCounts,
-                  mentionedUsers: post.mentionedUsers,
-                  post: post,
-                  topicId: widget.topicId,
-                  onQuoteImage: widget.onQuoteImage,
-                  onInternalLinkTap: (topicId, topicSlug, postNumber) {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => TopicDetailPage(
-                          topicId: topicId,
-                          initialTitle: topicSlug,
-                          scrollToPostNumber: postNumber,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  ConstrainedBox(
+                    // 弹幕模式下正文至少预留 1 行弹幕高度，避免短帖第一行弹幕被截
+                    constraints: BoxConstraints(
+                      minHeight: showDanmaku ? danmakuTrackHeight : 0,
+                    ),
+                    child: Listener(
+                      behavior: HitTestBehavior.translucent,
+                      onPointerDown: (_) =>
+                          CodeSelectionContextTracker.instance.clear(),
+                      child: ChunkedHtmlContent(
+                        html: post.cooked,
+                        textStyle: theme.textTheme.bodyMedium?.copyWith(
+                          height: 1.5,
+                          fontSize:
+                              (theme.textTheme.bodyMedium?.fontSize ?? 14) *
+                              ref.watch(preferencesProvider).contentFontScale,
                         ),
+                        linkCounts: post.linkCounts,
+                        mentionedUsers: post.mentionedUsers,
+                        post: post,
+                        topicId: widget.topicId,
+                        onQuoteImage: widget.onQuoteImage,
+                        onInternalLinkTap: (topicId, topicSlug, postNumber) {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(
+                              builder: (_) => TopicDetailPage(
+                                topicId: topicId,
+                                initialTitle: topicSlug,
+                                scrollToPostNumber: postNumber,
+                              ),
+                            ),
+                          );
+                        },
+                        onSelectionChanged: widget.onQuoteSelection != null
+                            ? (content) {
+                                _lastSelectedContent = content;
+                                _lastCodeSelectionContext = content == null
+                                    ? null
+                                    : CodeSelectionContextTracker
+                                          .instance
+                                          .current;
+                              }
+                            : null,
+                        contextMenuBuilder: widget.onQuoteSelection != null
+                            ? (context, state) {
+                                final items =
+                                    QuoteSelectionHelper.buildMenuItems(
+                                      baseItems: state.contextMenuButtonItems,
+                                      plainText:
+                                          _lastSelectedContent?.plainText,
+                                      post: post,
+                                      hideToolbar: state.hideToolbar,
+                                      topicId: widget.topicId,
+                                      onQuoteSelection: widget.onQuoteSelection,
+                                      codeContext: _lastCodeSelectionContext,
+                                    );
+                                return AdaptiveTextSelectionToolbar.buttonItems(
+                                  anchors: state.contextMenuAnchors,
+                                  buttonItems: items,
+                                );
+                              }
+                            : null,
                       ),
-                    );
-                  },
-                  onSelectionChanged: widget.onQuoteSelection != null
-                      ? (content) {
-                          _lastSelectedContent = content;
-                          _lastCodeSelectionContext = content == null
-                              ? null
-                              : CodeSelectionContextTracker.instance.current;
-                        }
-                      : null,
-                  contextMenuBuilder: widget.onQuoteSelection != null
-                      ? (context, state) {
-                          final items = QuoteSelectionHelper.buildMenuItems(
-                            baseItems: state.contextMenuButtonItems,
-                            plainText: _lastSelectedContent?.plainText,
-                            post: post,
-                            hideToolbar: state.hideToolbar,
-                            topicId: widget.topicId,
-                            onQuoteSelection: widget.onQuoteSelection,
-                            codeContext: _lastCodeSelectionContext,
-                          );
-                          return AdaptiveTextSelectionToolbar.buttonItems(
-                            anchors: state.contextMenuAnchors,
-                            buttonItems: items,
-                          );
-                        }
-                      : null,
-                ),
+                    ),
+                  ),
+                  if (showDanmaku)
+                    Positioned.fill(
+                      child: BoostDanmaku(
+                        visibilityKey: post.id,
+                        boosts: post.boosts!,
+                        maxTrackCount: danmakuTrackCount,
+                        trackHeight: danmakuTrackHeight,
+                        highlightUsername: widget.highlightBoostUsername,
+                        onBoostTap: (boost) {
+                          _footerKey.currentState?.showBoostActions(boost);
+                        },
+                      ),
+                    ),
+                ],
               ),
             ),
             // 用户签名
@@ -263,7 +325,7 @@ class _PostItemState extends ConsumerState<PostItem> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Icon(
-                            Icons.visibility_outlined,
+                            Symbols.visibility_rounded,
                             size: 15,
                             color: theme.colorScheme.primary,
                           ),
@@ -282,7 +344,10 @@ class _PostItemState extends ConsumerState<PostItem> {
               ),
             SelectionContainer.disabled(
               child: PostFooterSection(
+                key: _footerKey,
                 post: post,
+                forceShowBoostList: _danmakuOverride == false,
+                danmakuActive: showDanmakuToggle ? showDanmaku : null,
                 topicId: widget.topicId,
                 topicHasAcceptedAnswer: widget.topicHasAcceptedAnswer,
                 acceptedAnswers: widget.acceptedAnswers,
@@ -297,6 +362,7 @@ class _PostItemState extends ConsumerState<PostItem> {
                 useReplyDialog: widget.useReplyDialog,
                 topicTitle: widget.topicTitle,
                 isPrivateMessageTopic: widget.isPrivateMessageTopic,
+                isPmWithNonHumanUser: widget.isPmWithNonHumanUser,
                 onShowPostDetail: widget.onShowPostDetail,
                 hideRepliesButton: widget.hideRepliesButton,
                 opTopSlot: widget.opTopSlot,

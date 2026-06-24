@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/cdk_providers.dart';
 import '../pages/webview_page.dart';
@@ -7,6 +8,8 @@ import 'common/loading_spinner.dart';
 import '../../../../l10n/s.dart';
 
 class CdkBalanceCard extends ConsumerWidget {
+  static const String _dashboardUrl = 'https://cdk.linux.do/dashboard';
+
   final bool compact;
   final bool inline;
   final bool showDivider;
@@ -49,7 +52,7 @@ class CdkBalanceCard extends ConsumerWidget {
         child: InkWell(
           onTap: () => WebViewPage.open(
             context,
-            'https://cdk.linux.do',
+            _dashboardUrl,
             title: 'LINUX DO CDK',
           ),
           child: Column(
@@ -65,7 +68,7 @@ class CdkBalanceCard extends ConsumerWidget {
                         shape: BoxShape.circle,
                       ),
                       child: Icon(
-                        Icons.token_rounded,
+                        Symbols.token_rounded,
                         size: 20,
                         color: theme.colorScheme.onTertiaryContainer,
                       ),
@@ -98,7 +101,7 @@ class CdkBalanceCard extends ConsumerWidget {
                       )
                     else
                       Icon(
-                        Icons.chevron_right_rounded,
+                        Symbols.chevron_right_rounded,
                         color: theme.colorScheme.outline.withValues(alpha: 0.4),
                         size: 20,
                       ),
@@ -124,7 +127,7 @@ class CdkBalanceCard extends ConsumerWidget {
       return GestureDetector(
         onTap: () => WebViewPage.open(
           context,
-          'https://cdk.linux.do',
+          _dashboardUrl,
           title: 'LINUX DO CDK',
         ),
         child: Card(
@@ -146,7 +149,7 @@ class CdkBalanceCard extends ConsumerWidget {
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
-                  Icons.token_rounded,
+                  Symbols.token_rounded,
                   size: 20,
                   color: theme.colorScheme.onTertiaryContainer,
                 ),
@@ -187,7 +190,7 @@ class CdkBalanceCard extends ConsumerWidget {
     return GestureDetector(
       onTap: () => WebViewPage.open(
         context,
-        'https://cdk.linux.do',
+        _dashboardUrl,
         title: 'LINUX DO CDK',
       ),
       child: Card(
@@ -216,7 +219,7 @@ class CdkBalanceCard extends ConsumerWidget {
               right: -20,
               top: -20,
               child: Icon(
-                Icons.token_rounded,
+                Symbols.token_rounded,
                 size: 150,
                 color: Colors.white.withValues(alpha:0.1),
               ),
@@ -235,7 +238,7 @@ class CdkBalanceCard extends ConsumerWidget {
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: const Icon(
-                          Icons.token_rounded,
+                          Symbols.token_rounded,
                           color: Colors.white,
                           size: 20,
                         ),
@@ -265,7 +268,7 @@ class CdkBalanceCard extends ConsumerWidget {
                               shape: BoxShape.circle,
                             ),
                             child: Icon(
-                              Icons.power_settings_new_rounded,
+                              Symbols.power_settings_new_rounded,
                               color: Colors.white.withValues(alpha:0.7),
                               size: 18,
                             ),
@@ -327,7 +330,7 @@ class CdkBalanceCard extends ConsumerWidget {
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
-                      isExpired ? Icons.lock_clock_rounded : Icons.error_outline_rounded,
+                      isExpired ? Symbols.lock_clock_rounded : Symbols.error_rounded,
                       size: 20,
                       color: isExpired
                           ? theme.colorScheme.error
@@ -412,7 +415,7 @@ class CdkBalanceCard extends ConsumerWidget {
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
-                  isExpired ? Icons.lock_clock_rounded : Icons.error_outline_rounded,
+                  isExpired ? Symbols.lock_clock_rounded : Symbols.error_rounded,
                   size: 20,
                   color: isExpired
                       ? theme.colorScheme.error
@@ -491,7 +494,7 @@ class CdkBalanceCard extends ConsumerWidget {
               right: -20,
               top: -20,
               child: Icon(
-                isExpired ? Icons.lock_clock_rounded : Icons.error_outline_rounded,
+                isExpired ? Symbols.lock_clock_rounded : Symbols.error_rounded,
                 size: 150,
                 color: Colors.white.withValues(alpha: 0.1),
               ),
@@ -510,7 +513,7 @@ class CdkBalanceCard extends ConsumerWidget {
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Icon(
-                          isExpired ? Icons.lock_clock_rounded : Icons.error_outline_rounded,
+                          isExpired ? Symbols.lock_clock_rounded : Symbols.error_rounded,
                           color: Colors.white,
                           size: 20,
                         ),
@@ -535,7 +538,7 @@ class CdkBalanceCard extends ConsumerWidget {
                               shape: BoxShape.circle,
                             ),
                             child: Icon(
-                              Icons.power_settings_new_rounded,
+                              Symbols.power_settings_new_rounded,
                               color: Colors.white.withValues(alpha: 0.7),
                               size: 18,
                             ),
@@ -563,7 +566,7 @@ class CdkBalanceCard extends ConsumerWidget {
                   if (isExpired && onReauthorize != null)
                     FilledButton.icon(
                       onPressed: onReauthorize,
-                      icon: const Icon(Icons.refresh_rounded, size: 18),
+                      icon: const Icon(Symbols.refresh_rounded, size: 18),
                       label: Text(S.current.common_reAuth),
                       style: FilledButton.styleFrom(
                         backgroundColor: Colors.white.withValues(alpha: 0.2),
@@ -573,7 +576,7 @@ class CdkBalanceCard extends ConsumerWidget {
                   else
                     FilledButton.icon(
                       onPressed: () => ref.read(cdkUserInfoProvider.notifier).refresh(),
-                      icon: const Icon(Icons.refresh_rounded, size: 18),
+                      icon: const Icon(Symbols.refresh_rounded, size: 18),
                       label: Text(S.current.common_retry),
                       style: FilledButton.styleFrom(
                         backgroundColor: Colors.white.withValues(alpha: 0.2),
@@ -606,7 +609,7 @@ class CdkBalanceCard extends ConsumerWidget {
                     shape: BoxShape.circle,
                   ),
                   child: Icon(
-                    Icons.token_rounded,
+                    Symbols.token_rounded,
                     size: 20,
                     color: theme.colorScheme.onTertiaryContainer,
                   ),
@@ -660,7 +663,7 @@ class CdkBalanceCard extends ConsumerWidget {
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
-                  Icons.token_rounded,
+                  Symbols.token_rounded,
                   size: 20,
                   color: theme.colorScheme.onTertiaryContainer,
                 ),
@@ -707,7 +710,7 @@ class CdkBalanceCard extends ConsumerWidget {
                 color: Colors.white.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(12),
               ),
-              child: const Icon(Icons.token_rounded, color: Colors.white, size: 20),
+              child: const Icon(Symbols.token_rounded, color: Colors.white, size: 20),
             ),
             const SizedBox(width: 12),
             Expanded(

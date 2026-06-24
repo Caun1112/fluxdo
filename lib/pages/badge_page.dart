@@ -7,13 +7,16 @@ import '../widgets/common/relative_time_text.dart';
 import '../utils/font_awesome_helper.dart';
 import '../services/discourse_cache_manager.dart';
 import '../utils/url_helper.dart';
+import '../widgets/common/error_view.dart';
 import '../widgets/common/loading_spinner.dart';
+import '../widgets/common/smart_avatar.dart';
 import '../widgets/badge/badge_ui_utils.dart';
 import '../widgets/content/discourse_html_content/discourse_html_content_widget.dart';
 import '../services/emoji_handler.dart';
 import 'topic_detail_page/topic_detail_page.dart';
 import 'user_profile_page.dart';
 import '../l10n/s.dart';
+import 'package:app_icons/app_icons.dart';
 
 /// 徽章详情页面
 class BadgePage extends ConsumerStatefulWidget {
@@ -36,7 +39,8 @@ class _BadgePageState extends ConsumerState<BadgePage> {
   final DiscourseService _service = DiscourseService();
   BadgeDetailResponse? _badgeDetail;
   bool _isLoading = true;
-  String? _error;
+  Object? _error;
+  StackTrace? _errorStack;
 
   @override
   void initState() {
@@ -48,6 +52,7 @@ class _BadgePageState extends ConsumerState<BadgePage> {
     setState(() {
       _isLoading = true;
       _error = null;
+      _errorStack = null;
     });
 
     try {
@@ -68,11 +73,12 @@ class _BadgePageState extends ConsumerState<BadgePage> {
           _isLoading = false;
         });
       }
-    } catch (e) {
+    } catch (e, s) {
       debugPrint('Error loading badge detail: $e');
       if (mounted) {
         setState(() {
-          _error = e.toString();
+          _error = e;
+          _errorStack = s;
           _isLoading = false;
         });
       }
@@ -89,125 +95,126 @@ class _BadgePageState extends ConsumerState<BadgePage> {
       body: _isLoading
           ? const Center(child: LoadingSpinner())
           : _error != null
-              ? Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.error_outline, size: 64, color: Colors.grey),
-                      const SizedBox(height: 16),
-                      Text('${context.l10n.common_loadFailed}: $_error', style: const TextStyle(color: Colors.grey)),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: _onRefresh,
-                        child: Text(context.l10n.common_retry),
-                      ),
-                    ],
-                  ),
-                )
-              : RefreshIndicator(
-                  onRefresh: _onRefresh,
-                  child: CustomScrollView(
-                    slivers: [
-                      // Modern Sliver App Bar
-                      _buildSliverAppBar(context),
-                      
-                      // Badge Info Card (Floating effect)
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
-                        sliver: SliverToBoxAdapter(
-                          child: _BadgeInfoCard(badge: _badgeDetail!.badge),
-                        ),
-                      ),
+          ? ErrorView(
+              error: _error!,
+              stackTrace: _errorStack,
+              onRetry: _onRefresh,
+            )
+          : RefreshIndicator(
+              onRefresh: _onRefresh,
+              child: CustomScrollView(
+                slivers: [
+                  // Modern Sliver App Bar
+                  _buildSliverAppBar(context),
 
-                      // Users Header
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(20, 24, 20, 12),
-                        sliver: SliverToBoxAdapter(
-                          child: Row(
-                            children: [
-                              Icon(
-                                Icons.people_outline,
-                                color: Theme.of(context).colorScheme.primary,
-                                size: 22,
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                context.l10n.badge_grantees,
-                                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 18,
-                                    ),
-                              ),
-                              const Spacer(),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                                  borderRadius: BorderRadius.circular(20),
+                  // Badge Info Card (Floating effect)
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
+                    sliver: SliverToBoxAdapter(
+                      child: _BadgeInfoCard(badge: _badgeDetail!.badge),
+                    ),
+                  ),
+
+                  // Users Header
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(20, 24, 20, 12),
+                    sliver: SliverToBoxAdapter(
+                      child: Row(
+                        children: [
+                          Icon(
+                            Symbols.group_rounded,
+                            color: Theme.of(context).colorScheme.primary,
+                            size: 22,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            context.l10n.badge_grantees,
+                            style: Theme.of(context).textTheme.titleMedium
+                                ?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 18,
                                 ),
-                                child: Text(
-                                  context.l10n.badge_granteeCount(_badgeDetail!.totalCount),
-                                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                                    fontWeight: FontWeight.w600,
+                          ),
+                          const Spacer(),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Text(
+                              context.l10n.badge_granteeCount(
+                                _badgeDetail!.totalCount,
+                              ),
+                              style: Theme.of(context).textTheme.labelSmall
+                                  ?.copyWith(fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  // User List
+                  _badgeDetail!.userBadges.isEmpty
+                      ? SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Symbols.person_off_rounded,
+                                  size: 48,
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.outline.withValues(alpha: 0.5),
+                                ),
+                                const SizedBox(height: 12),
+                                Text(
+                                  context.l10n.badge_noGrantees,
+                                  style: TextStyle(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.outline,
                                   ),
                                 ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-
-                      // User List
-                      _badgeDetail!.userBadges.isEmpty
-                          ? SliverFillRemaining(
-                              hasScrollBody: false,
-                              child: Center(
-                                child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Icon(
-                                      Icons.person_off_outlined,
-                                      size: 48,
-                                      color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.5),
-                                    ),
-                                    const SizedBox(height: 12),
-                                    Text(
-                                      context.l10n.badge_noGrantees,
-                                      style: TextStyle(
-                                        color: Theme.of(context).colorScheme.outline,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            )
-                          : SliverList(
-                              delegate: SliverChildBuilderDelegate(
-                                (context, index) {
-                                  final userBadge = _badgeDetail!.userBadges[index];
-
-                                  if (_badgeDetail!.grantedBies.isEmpty) {
-                                    return const SizedBox.shrink();
-                                  }
-
-                                  // Safe user lookup
-                                  final user = _badgeDetail!.grantedBies.firstWhere(
-                                    (u) => u.id == userBadge.userId,
-                                    orElse: () => _badgeDetail!.grantedBies.first,
-                                  );
-
-                                  return _UserBadgeItem(
-                                    userBadge: userBadge,
-                                    user: user,
-                                  );
-                                },
-                                childCount: _badgeDetail!.userBadges.length,
-                              ),
+                              ],
                             ),
-                      const SliverPadding(padding: EdgeInsets.only(bottom: 48)),
-                    ],
-                  ),
-                ),
+                          ),
+                        )
+                      : SliverList(
+                          delegate: SliverChildBuilderDelegate((
+                            context,
+                            index,
+                          ) {
+                            final userBadge = _badgeDetail!.userBadges[index];
+
+                            if (_badgeDetail!.grantedBies.isEmpty) {
+                              return const SizedBox.shrink();
+                            }
+
+                            // Safe user lookup
+                            final user = _badgeDetail!.grantedBies.firstWhere(
+                              (u) => u.id == userBadge.userId,
+                              orElse: () => _badgeDetail!.grantedBies.first,
+                            );
+
+                            return _UserBadgeItem(
+                              userBadge: userBadge,
+                              user: user,
+                            );
+                          }, childCount: _badgeDetail!.userBadges.length),
+                        ),
+                  const SliverPadding(padding: EdgeInsets.only(bottom: 48)),
+                ],
+              ),
+            ),
     );
   }
 
@@ -222,15 +229,11 @@ class _BadgePageState extends ConsumerState<BadgePage> {
       pinned: true,
       backgroundColor: Theme.of(context).colorScheme.surface,
       elevation: 0,
-      iconTheme: IconThemeData(
-        color: Theme.of(context).colorScheme.onSurface,
-      ),
+      iconTheme: IconThemeData(color: Theme.of(context).colorScheme.onSurface),
       flexibleSpace: FlexibleSpaceBar(
         background: Container(
           decoration: BoxDecoration(gradient: gradient),
-          child: Center(
-            child: _buildLargeBadgeIcon(badge, iconColor),
-          ),
+          child: Center(child: _buildLargeBadgeIcon(badge, iconColor)),
         ),
       ),
     );
@@ -327,12 +330,15 @@ class _BadgeInfoCard extends StatelessWidget {
             ),
           ),
 
-          if (badge.longDescription != null && badge.longDescription!.isNotEmpty) ...[
+          if (badge.longDescription != null &&
+              badge.longDescription!.isNotEmpty) ...[
             const SizedBox(height: 16),
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+                color: theme.colorScheme.surfaceContainerHighest.withValues(
+                  alpha: 0.3,
+                ),
                 borderRadius: BorderRadius.circular(16),
               ),
               child: DiscourseHtmlContent(
@@ -346,15 +352,17 @@ class _BadgeInfoCard extends StatelessWidget {
           ],
 
           const SizedBox(height: 24),
-          Divider(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.2)),
+          Divider(
+            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.2),
+          ),
           const SizedBox(height: 16),
-          
+
           // Grant Count
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(
-                Icons.emoji_events_outlined,
+                Symbols.emoji_events_rounded,
                 size: 20,
                 color: theme.colorScheme.secondary,
               ),
@@ -380,15 +388,12 @@ class _UserBadgeItem extends StatelessWidget {
   final UserBadge userBadge;
   final BadgeUser user;
 
-  const _UserBadgeItem({
-    required this.userBadge,
-    required this.user,
-  });
+  const _UserBadgeItem({required this.userBadge, required this.user});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    
+
     return InkWell(
       onTap: userBadge.topicId != null ? () => _navigateToTopic(context) : null,
       child: Padding(
@@ -403,19 +408,22 @@ class _UserBadgeItem extends StatelessWidget {
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+                    color: theme.colorScheme.outlineVariant.withValues(
+                      alpha: 0.4,
+                    ),
                     width: 1,
                   ),
                 ),
-                child: CircleAvatar(
+                child: SmartAvatar(
+                  imageUrl: user.getAvatarUrl(),
                   radius: 24,
                   backgroundColor: theme.colorScheme.surfaceContainerHighest,
-                  backgroundImage: discourseImageProvider(user.getAvatarUrl()),
+                  fallbackText: user.username,
                 ),
               ),
             ),
             const SizedBox(width: 16),
-            
+
             // Info
             Expanded(
               child: Column(
@@ -438,15 +446,23 @@ class _UserBadgeItem extends StatelessWidget {
                       ),
                       if (user.admin == true) ...[
                         const SizedBox(width: 4),
-                        Icon(Icons.shield, size: 14, color: Colors.red.shade700),
+                        Icon(
+                          Symbols.shield_rounded,
+                          size: 14,
+                          color: Colors.red.shade700,
+                        ),
                       ] else if (user.moderator == true) ...[
                         const SizedBox(width: 4),
-                        Icon(Icons.shield, size: 14, color: Colors.blue.shade700),
+                        Icon(
+                          Symbols.shield_rounded,
+                          size: 14,
+                          color: Colors.blue.shade700,
+                        ),
                       ],
                     ],
                   ),
                   const SizedBox(height: 4),
-                  
+
                   // Date
                   RelativeTimeText(
                     dateTime: userBadge.grantedAt,
@@ -461,15 +477,19 @@ class _UserBadgeItem extends StatelessWidget {
                   if (userBadge.topicTitle != null) ...[
                     const SizedBox(height: 8),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
                       decoration: BoxDecoration(
-                        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+                        color: theme.colorScheme.surfaceContainerHighest
+                            .withValues(alpha: 0.4),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Row(
                         children: [
                           Icon(
-                            Icons.article_outlined,
+                            Symbols.article_rounded,
                             size: 14,
                             color: theme.colorScheme.primary,
                           ),

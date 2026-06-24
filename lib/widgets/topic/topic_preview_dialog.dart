@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
@@ -167,83 +168,80 @@ class _TopicPreviewDialogState extends ConsumerState<TopicPreviewDialog> {
           maxWidth: maxWidth.clamp(300, 500),
           maxHeight: maxHeight,
         ),
-        child: SizedBox(
+        child: Column(
           key: const ValueKey('topic-preview-root'),
-          height: maxHeight,
-          child: Column(
-            mainAxisSize: MainAxisSize.max,
-            children: [
-              Expanded(
-                child: Material(
-                  color: theme.colorScheme.surface,
-                  borderRadius: BorderRadius.circular(20),
-                  clipBehavior: Clip.antiAlias,
-                  elevation: 8,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        height: 4,
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [
-                              theme.colorScheme.primaryContainer,
-                              theme.colorScheme.tertiaryContainer,
-                            ],
-                          ),
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Material(
+                color: theme.colorScheme.surface,
+                borderRadius: BorderRadius.circular(20),
+                clipBehavior: Clip.antiAlias,
+                elevation: 8,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      height: 4,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            theme.colorScheme.primaryContainer,
+                            theme.colorScheme.tertiaryContainer,
+                          ],
                         ),
                       ),
-                      if (hasCustomActionPanel)
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                          child: widget.customActionPanelBuilder!(context),
+                    ),
+                    if (hasCustomActionPanel)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                        child: widget.customActionPanelBuilder!(context),
+                      ),
+                    Flexible(
+                      child: SingleChildScrollView(
+                        padding: EdgeInsets.fromLTRB(
+                          20,
+                          hasCustomActionPanel ? 16 : 20,
+                          20,
+                          20,
                         ),
-                      Expanded(
-                        child: SingleChildScrollView(
-                          padding: EdgeInsets.fromLTRB(
-                            20,
-                            hasCustomActionPanel ? 16 : 20,
-                            20,
-                            20,
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              _buildTitle(context, theme),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildTitle(context, theme),
+                            const SizedBox(height: 12),
+                            _buildAuthorInfo(context, theme),
+                            if (category != null || topic.tags.isNotEmpty) ...[
                               const SizedBox(height: 12),
-                              _buildAuthorInfo(context, theme),
-                              if (category != null ||
-                                  topic.tags.isNotEmpty) ...[
-                                const SizedBox(height: 12),
-                                _buildCategoryAndTags(
-                                  context,
-                                  theme,
-                                  category,
-                                  faIcon,
-                                  logoUrl,
-                                ),
-                              ],
-                              const SizedBox(height: 16),
-                              _buildPostContent(context, theme),
-                              const SizedBox(height: 16),
-                              if (topic.posters.length > 1)
-                                _buildParticipants(context, theme),
-                              _buildStats(context, theme),
+                              _buildCategoryAndTags(
+                                context,
+                                theme,
+                                category,
+                                faIcon,
+                                logoUrl,
+                              ),
                             ],
-                          ),
+                            const SizedBox(height: 16),
+                            _buildPostContent(context, theme),
+                            const SizedBox(height: 16),
+                            if (topic.posters.length > 1)
+                              _buildParticipants(context, theme),
+                            _buildStats(context, theme),
+                          ],
                         ),
                       ),
-                      _buildActions(context, theme),
-                    ],
-                  ),
+                    ),
+                    _buildActions(context, theme),
+                  ],
                 ),
               ),
-              if (hasActions) ...[
-                const SizedBox(height: 8),
-                _buildCustomActions(context, theme),
-              ],
+            ),
+            if (hasActions) ...[
+              const SizedBox(height: 8),
+              _buildCustomActions(context, theme),
             ],
-          ),
+          ],
         ),
       ),
     );
@@ -343,7 +341,7 @@ class _TopicPreviewDialogState extends ConsumerState<TopicPreviewDialog> {
               child: Padding(
                 padding: const EdgeInsets.only(right: 6),
                 child: Icon(
-                  Icons.lock_outline,
+                  Symbols.lock_rounded,
                   size: 20,
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
@@ -355,7 +353,7 @@ class _TopicPreviewDialogState extends ConsumerState<TopicPreviewDialog> {
               child: Padding(
                 padding: const EdgeInsets.only(right: 6),
                 child: Icon(
-                  Icons.push_pin_rounded,
+                  Symbols.push_pin_rounded,
                   size: 20,
                   color: theme.colorScheme.primary,
                 ),
@@ -366,7 +364,7 @@ class _TopicPreviewDialogState extends ConsumerState<TopicPreviewDialog> {
               alignment: PlaceholderAlignment.middle,
               child: Padding(
                 padding: const EdgeInsets.only(right: 6),
-                child: Icon(Icons.check_box, size: 20, color: Colors.green),
+                child: Icon(Symbols.check_box_rounded, size: 20, color: Colors.green),
               ),
             ),
           ...EmojiText.buildEmojiSpans(
@@ -591,7 +589,7 @@ class _TopicPreviewDialogState extends ConsumerState<TopicPreviewDialog> {
             Expanded(
               child: _buildStatItem(
                 context,
-                Icons.chat_bubble_outline_rounded,
+                Symbols.chat_bubble_rounded,
                 S.current.topic_replyCount(
                   (topic.postsCount - 1).clamp(0, 999999),
                 ),
@@ -600,7 +598,7 @@ class _TopicPreviewDialogState extends ConsumerState<TopicPreviewDialog> {
             Expanded(
               child: _buildStatItem(
                 context,
-                Icons.favorite_border_rounded,
+                Symbols.favorite_border_rounded,
                 S.current.topic_likeCount(
                   NumberUtils.formatCount(topic.likeCount),
                 ),
@@ -614,14 +612,14 @@ class _TopicPreviewDialogState extends ConsumerState<TopicPreviewDialog> {
             Expanded(
               child: _buildStatItem(
                 context,
-                Icons.visibility_outlined,
+                Symbols.visibility_rounded,
                 S.current.topic_viewCount(NumberUtils.formatCount(topic.views)),
               ),
             ),
             Expanded(
               child: _buildStatWidgetItem(
                 context,
-                Icons.access_time,
+                Symbols.access_time_rounded,
                 RelativeTimeText(
                   dateTime: topic.lastPostedAt,
                   displayStyle: TimeDisplayStyle.prefixed,
@@ -704,7 +702,7 @@ class _TopicPreviewDialogState extends ConsumerState<TopicPreviewDialog> {
               );
               SharePlus.instance.share(ShareParams(text: url));
             },
-            icon: const Icon(Icons.share_outlined, size: 20),
+            icon: const Icon(Symbols.share_rounded, size: 20),
             tooltip: S.current.common_share,
           ),
 
@@ -716,7 +714,7 @@ class _TopicPreviewDialogState extends ConsumerState<TopicPreviewDialog> {
               Navigator.of(context).pop();
               widget.onOpen?.call();
             },
-            icon: const Icon(Icons.open_in_new, size: 18),
+            icon: const Icon(Symbols.open_in_new_rounded, size: 18),
             label: Text(S.current.common_viewDetails),
           ),
         ],

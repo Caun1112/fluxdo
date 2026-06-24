@@ -80,11 +80,29 @@ class SessionCookieSentinel {
   ///
   /// 详见 §5.1 接口契约。接受任意 name —— 不再限定 critical 列表,
   /// 配合 Priming/AppCookieManager 全量同步使用。
+  ///
+  /// [force] 为 false 时, ensureUnique 意图在 [_throttleWindow] 内对同名
+  /// cookie 重复调用会直接返回 noop, 省掉高频响应路径上的重复 WV IPC。
+  /// 权衡: 窗口内 WV 新产生的变体会推迟到下一次该 name 的 sweep 处理
+  /// (sweep 本就是最终一致的兜底)。delete 意图与 [sweepAll]（boundary
+  /// sync / priming 等关键路径）不节流。
   Future<SweepResult> sweep(
     String url,
     String name, {
     SweepIntent intent = SweepIntent.ensureUnique,
+    bool force = false,
   }) async {
+    if (!force &&
+        intent == SweepIntent.ensureUnique &&
+        wasRecentlySwept(name)) {
+      return SweepResult(
+        name: name,
+        status: SweepStatus.noop,
+        variantsBefore: 0,
+        variantsAfter: 0,
+        elapsed: Duration.zero,
+      );
+    }
     final entryGen = _auth.generation;
     final lock = _locks.putIfAbsent(name, () => Lock());
 
@@ -129,7 +147,7 @@ class SessionCookieSentinel {
       debugPrint('[Sentinel] sweepAll wv lookup failed: $e');
     }
     if (names.isEmpty) return const [];
-    final futures = names.map((name) => sweep(url, name));
+    final futures = names.map((name) => sweep(url, name, force: true));
     return await Future.wait(futures);
   }
 
@@ -144,6 +162,7 @@ class SessionCookieSentinel {
     Duration? primingDuration;
     try {
       final uri = Uri.parse(url);
+      await _jar.enforceAuthCookiePolicy(reason: 'nuclear_reset');
       final jarCookies = await _jar.loadCanonicalCookiesForRequest(uri);
 
       // 1. 清空 WV: jar+WV 联合 name set 的所有 variant
@@ -169,17 +188,25 @@ class SessionCookieSentinel {
         }
         // 用 toSetCookieHeader 保留 hostOnly/Domain/SameSite, 避免与 WV
         // 网络层写入的同名 cookie 共存 (详见 _writeWinnerToWebView 注释)
-        await _writer.setRawCookie(url, cookie.toSetCookieHeader());
+        await _writer.setRawCookie(
+          url,
+          cookie.toSetCookieHeader(),
+          writeSharedStorage: cookie.name != 'cf_clearance',
+        );
       }
       primingDuration = stopwatch.elapsed - primingStart;
 
       // 3. 校验：每个 jar cookie 在 WV 中变体数 ≤ 1
       var allOk = true;
+      String? duplicatedName;
+      int? duplicatedCount;
       for (final cookie in jarCookies) {
         if (cookie.value.isEmpty) continue;
         final count = await _writer.countCookiesByName(url, cookie.name);
         if (count > 1) {
           allOk = false;
+          duplicatedName = cookie.name;
+          duplicatedCount = count;
           break;
         }
       }
@@ -188,7 +215,9 @@ class SessionCookieSentinel {
         success: allOk,
         elapsed: stopwatch.elapsed,
         primingDuration: primingDuration,
-        error: allOk ? null : 'Variants still > 1 after reset',
+        error: allOk
+            ? null
+            : '$duplicatedName variants still $duplicatedCount after reset',
       );
     } catch (e) {
       return NuclearResetResult(
@@ -211,10 +240,7 @@ class SessionCookieSentinel {
   }
 
   /// 该 name 最近 [within] 时长内是否 sweep 过。
-  bool wasRecentlySwept(
-    String name, {
-    Duration within = _throttleWindow,
-  }) {
+  bool wasRecentlySwept(String name, {Duration within = _throttleWindow}) {
     final last = _lastSweptAt[name];
     if (last == null) return false;
     return DateTime.now().difference(last) < within;
@@ -309,13 +335,13 @@ class SessionCookieSentinel {
     }
 
     final after = await _writer.countCookiesByName(url, name);
-    if (after == 0) {
+    if (after == 0 || await _residualIsAcceptable(url, name, 0)) {
       _markSweepSuccess(name);
       final result = SweepResult(
         name: name,
         status: SweepStatus.swept,
         variantsBefore: variantsBefore,
-        variantsAfter: 0,
+        variantsAfter: after,
         elapsed: stopwatch.elapsed,
       );
       _eventController.add(SweepCompleted(result: result));
@@ -325,13 +351,19 @@ class SessionCookieSentinel {
         name: name,
         intent: 'delete',
         variantsBefore: variantsBefore,
-        variantsAfter: 0,
+        variantsAfter: after,
         elapsedMs: stopwatch.elapsedMilliseconds,
       );
       return result;
     }
 
-    return await _doNuclearReset(url, name, variantsBefore, stopwatch);
+    return await _doNuclearReset(
+      url,
+      name,
+      SweepIntent.delete,
+      variantsBefore,
+      stopwatch,
+    );
   }
 
   Future<SweepResult> _sweepEnsureUnique({
@@ -387,7 +419,7 @@ class SessionCookieSentinel {
     }
 
     final after = await _writer.countCookiesByName(url, name);
-    if (after <= 1) {
+    if (after <= 1 || await _residualIsAcceptable(url, name, 1)) {
       _markSweepSuccess(name);
 
       // 反向同步 jar（仅当 winner 来自 webview，避免覆写 jar 的最新值）
@@ -417,7 +449,49 @@ class SessionCookieSentinel {
       return result;
     }
 
-    return await _doNuclearReset(url, name, variantsBefore, stopwatch);
+    return await _doNuclearReset(
+      url,
+      name,
+      SweepIntent.ensureUnique,
+      variantsBefore,
+      stopwatch,
+    );
+  }
+
+  /// 会被 CF 设为 Partitioned(CHIPS)的 cookie 名单:分区那份在 Android WebView
+  /// 删不掉(Chromium partition-key bug)、又是合法的跨站共存,不应被当"重复"反复清。
+  static const _chipsCookieNames = {'cf_clearance'};
+
+  /// 删除/去重后仍有残留时,判断是否为"可接受的不可删残留"(CHIPS 分区)。
+  /// 是则视为成功,停止 sweep_failed 与 nuclear reset 空转——不删除、不影响功能,
+  /// 分区那份本就是 CF Turnstile 需要的合法 cookie。
+  Future<bool> _residualIsAcceptable(
+    String url,
+    String name,
+    int expectedMaxAfter,
+  ) async {
+    if (!_chipsCookieNames.contains(name)) return false;
+    final variants = (await _writer.getAllCookieInfos(url))
+        .where((c) => c.name == name)
+        .toList(growable: false);
+    if (variants.isEmpty) return true;
+    final partitioned = variants.where((c) => c.isPartitioned == true).length;
+    final nonPartitioned = variants.length - partitioned;
+    // ① 精确(WebView 提供 Partitioned 属性时):分区那份豁免,非分区变体已达标 → 接受。
+    final acceptByPartition = nonPartitioned <= expectedMaxAfter;
+    // ② 兜底(WebView 未给 Partitioned 属性时):残留全部同值,视为同一 clearance 的
+    //    不可删副本(CHIPS 分区 / CF 未轮换)→ 接受。覆盖 getCookieInfo 不带属性的设备。
+    final firstVal = variants.first.value;
+    final acceptBySameValue = variants.every((c) => c.value == firstVal);
+    final accepted = acceptByPartition || acceptBySameValue;
+    if (accepted) {
+      debugPrint(
+        '[Sentinel] residual $name accepted: total=${variants.length} '
+        'partitioned=$partitioned nonPartitioned=$nonPartitioned '
+        'byPartition=$acceptByPartition bySameValue=$acceptBySameValue',
+      );
+    }
+    return accepted;
   }
 
   /// 执行删除：穷举 (domain, path) 组合。
@@ -425,11 +499,7 @@ class SessionCookieSentinel {
     final uri = Uri.parse(url);
     final host = uri.host.toLowerCase();
 
-    final domainCandidates = <String?>{
-      null,
-      host,
-      '.$host',
-    };
+    final domainCandidates = <String?>{null, host, '.$host'};
     final reg = _registrableDomain(host);
     if (reg != null && reg != host) {
       domainCandidates.add(reg);
@@ -502,6 +572,18 @@ class SessionCookieSentinel {
       final jarMatch = variants.firstWhereOrNull(
         (v) => v.value == jarValue || v.value == jarValueDecoded,
       );
+
+      // Auth cookies are server-authoritative. A WebView snapshot can contain
+      // stale host/domain variants, so never pick a non-jar value merely
+      // because it differs from the jar value.
+      if (CookieJarService.authCookieNames.contains(name)) {
+        return _WinnerInfo(
+          cookieInfo:
+              jarMatch ?? CookieFullInfo(name: name, value: jarCookie.value),
+          source: 'jar',
+          canonical: jarCookie,
+        );
+      }
 
       if (jarMatch != null) {
         // 规则 1: 唯一且与 jar 一致, 直接用 jar canonical
@@ -595,7 +677,11 @@ class SessionCookieSentinel {
       final cookieToWrite = winnerValue == canonical.value
           ? canonical
           : canonical.copyWith(value: winnerValue);
-      await _writer.setRawCookie(url, cookieToWrite.toSetCookieHeader());
+      await _writer.setRawCookie(
+        url,
+        cookieToWrite.toSetCookieHeader(),
+        writeSharedStorage: cookieToWrite.name != 'cf_clearance',
+      );
       return;
     }
 
@@ -606,7 +692,9 @@ class SessionCookieSentinel {
     final winnerDomain = winner.domain;
     if (winnerDomain != null && winnerDomain.isNotEmpty) {
       final normalizedWinnerDomain =
-          (winnerDomain.startsWith('.') ? winnerDomain.substring(1) : winnerDomain)
+          (winnerDomain.startsWith('.')
+                  ? winnerDomain.substring(1)
+                  : winnerDomain)
               .toLowerCase();
       final host = uri.host.toLowerCase();
       if (normalizedWinnerDomain != host) {
@@ -634,7 +722,11 @@ class SessionCookieSentinel {
     if (sameSite != null && sameSite.isNotEmpty) {
       attrs.add('SameSite=$sameSite');
     }
-    await _writer.setRawCookie(url, attrs.join('; '));
+    await _writer.setRawCookie(
+      url,
+      attrs.join('; '),
+      writeSharedStorage: winner.name != 'cf_clearance',
+    );
   }
 
   /// 反向同步 winner 到 jar（路径 B 场景）。
@@ -649,11 +741,16 @@ class SessionCookieSentinel {
     try {
       final uri = Uri.parse(url);
       final host = uri.host.toLowerCase();
+      final isAuthCookie = CookieJarService.hostOnlyCookieNames.contains(
+        winner.name,
+      );
       String? domainToWrite;
       final winnerDomain = winner.domain;
-      if (winnerDomain != null && winnerDomain.isNotEmpty) {
+      if (!isAuthCookie && winnerDomain != null && winnerDomain.isNotEmpty) {
         final normalized =
-            (winnerDomain.startsWith('.') ? winnerDomain.substring(1) : winnerDomain)
+            (winnerDomain.startsWith('.')
+                    ? winnerDomain.substring(1)
+                    : winnerDomain)
                 .toLowerCase();
         if (normalized != host) {
           domainToWrite = winnerDomain;
@@ -665,7 +762,7 @@ class SessionCookieSentinel {
         winner.value,
         url: url,
         domain: domainToWrite,
-        path: winner.path ?? _pathDefault,
+        path: isAuthCookie ? _pathDefault : winner.path ?? _pathDefault,
         expires: winner.expiresMillis != null
             ? DateTime.fromMillisecondsSinceEpoch(
                 winner.expiresMillis!,
@@ -673,7 +770,8 @@ class SessionCookieSentinel {
               )
             : null,
         secure: winner.isSecure ?? true,
-        httpOnly: winner.isHttpOnly ?? true,
+        httpOnly: isAuthCookie ? true : winner.isHttpOnly ?? true,
+        trusted: isAuthCookie,
       );
     } catch (e) {
       debugPrint('[Sentinel] _syncWinnerToJar failed: $e');
@@ -684,6 +782,7 @@ class SessionCookieSentinel {
   Future<SweepResult> _doNuclearReset(
     String url,
     String name,
+    SweepIntent intent,
     int variantsBefore,
     Stopwatch stopwatch,
   ) async {
@@ -701,7 +800,12 @@ class SessionCookieSentinel {
       totalElapsedMs: nuclear.elapsed.inMilliseconds,
     );
     final after = await _writer.countCookiesByName(url, name);
-    final status = nuclear.success ? SweepStatus.nuclearReset : SweepStatus.failed;
+    final expectedMaxAfter = intent == SweepIntent.delete ? 0 : 1;
+    final targetSatisfied =
+        after <= expectedMaxAfter || await _residualIsAcceptable(url, name, expectedMaxAfter);
+    final status = targetSatisfied
+        ? SweepStatus.nuclearReset
+        : SweepStatus.failed;
     final result = SweepResult(
       name: name,
       status: status,
@@ -710,14 +814,30 @@ class SessionCookieSentinel {
       elapsed: stopwatch.elapsed,
     );
     _eventController.add(SweepCompleted(result: result));
-    if (!nuclear.success) {
+    if (targetSatisfied) {
+      CookieLogger.sweep(
+        event: 'swept',
+        url: url,
+        name: name,
+        intent: intent.name,
+        variantsBefore: variantsBefore,
+        variantsAfter: after,
+        reason: nuclear.success
+            ? 'nuclear reset restored target'
+            : 'target restored; global reset check failed: ${nuclear.error}',
+        elapsedMs: stopwatch.elapsedMilliseconds,
+      );
+    } else {
       CookieLogger.sweep(
         event: 'failed',
         url: url,
         name: name,
+        intent: intent.name,
         variantsBefore: variantsBefore,
         variantsAfter: after,
-        reason: 'nuclear reset failed: ${nuclear.error}',
+        reason:
+            'target variants after reset=$after, expected <= $expectedMaxAfter'
+            '${nuclear.error != null ? '; global error: ${nuclear.error}' : ''}',
         elapsedMs: stopwatch.elapsedMilliseconds,
       );
     }
@@ -929,7 +1049,8 @@ class CookieSweepException implements Exception {
   final Object? cause;
 
   @override
-  String toString() => 'CookieSweepException: $message'
+  String toString() =>
+      'CookieSweepException: $message'
       '${cause != null ? ' (caused by $cause)' : ''}';
 }
 
@@ -939,11 +1060,7 @@ class CookieSweepException implements Exception {
 /// 写回 WV 时的规范化 source of truth(完整的 hostOnly/Domain/SameSite
 /// 等字段)。winner 来自 WV 时为 null,fallback 到 [cookieInfo]。
 class _WinnerInfo {
-  _WinnerInfo({
-    required this.cookieInfo,
-    required this.source,
-    this.canonical,
-  });
+  _WinnerInfo({required this.cookieInfo, required this.source, this.canonical});
   final CookieFullInfo cookieInfo;
   final String source;
   final CanonicalCookie? canonical;

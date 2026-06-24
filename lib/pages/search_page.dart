@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/shortcut_binding.dart';
 import '../providers/discourse_providers.dart';
@@ -6,7 +7,9 @@ import '../models/search_filter.dart';
 import '../models/search_result.dart';
 import '../services/preloaded_data_service.dart';
 import '../widgets/common/smart_avatar.dart';
+import '../widgets/common/error_view.dart';
 import '../widgets/common/loading_spinner.dart';
+import '../widgets/common/paged_list_footer.dart';
 import '../widgets/search/search_filter_panel.dart';
 import '../widgets/search/search_post_card.dart';
 import '../widgets/search/search_preview_dialog.dart';
@@ -18,6 +21,7 @@ import '../services/app_error_handler.dart';
 import '../l10n/s.dart';
 import 'user_profile_page.dart';
 import '../utils/dialog_utils.dart';
+import '../utils/load_more_coordinator.dart';
 
 /// 搜索页面
 class SearchPage extends ConsumerStatefulWidget {
@@ -34,6 +38,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
   final _searchController = TextEditingController();
   final _focusNode = FocusNode();
   final _scrollController = ScrollController();
+  final LoadMoreCoordinator _loadMoreCoordinator = LoadMoreCoordinator();
   late final ShortcutSurfaceBinding _shortcutSurfaceBinding =
       ShortcutSurfaceBinding(
         ref: ref,
@@ -54,8 +59,9 @@ class _SearchPageState extends ConsumerState<SearchPage> {
   bool _hasMorePosts = false;
   bool _hasMoreUsers = false;
   bool _hasError = false;
+  Object? _searchError;
+  StackTrace? _searchErrorStack;
   bool _isLoadMoreFailed = false;
-  String _errorMessage = '';
 
   // 最近搜索记录
   List<String> _recentSearches = [];
@@ -168,10 +174,10 @@ class _SearchPageState extends ConsumerState<SearchPage> {
   }
 
   void _onScroll() {
-    if (_scrollController.position.pixels >=
-            _scrollController.position.maxScrollExtent - 200 &&
-        !_isLoadingMore &&
-        _hasMorePosts) {
+    final distance =
+        _scrollController.position.maxScrollExtent -
+        _scrollController.position.pixels;
+    if (_loadMoreCoordinator.shouldTriggerForDistance(distance)) {
       _loadMore();
     }
   }
@@ -360,6 +366,9 @@ class _SearchPageState extends ConsumerState<SearchPage> {
     if (_currentQuery.isEmpty) return;
 
     final isLoadMore = _currentPage > 1;
+    if (!isLoadMore) {
+      _loadMoreCoordinator.resetCooldown();
+    }
 
     setState(() {
       _hasError = false;
@@ -406,12 +415,12 @@ class _SearchPageState extends ConsumerState<SearchPage> {
         } else {
           _standardPosts.addAll(result.posts);
         }
-        _hasMorePosts = result.hasMorePosts;
+        _hasMorePosts = result.hasMorePosts && result.posts.isNotEmpty;
         _hasMoreUsers = result.hasMoreUsers;
         _isLoadingMore = false;
         _rebuildDisplayPosts();
       });
-    } catch (e) {
+    } catch (e, s) {
       setState(() {
         _isLoadingMore = false;
         if (isLoadMore) {
@@ -421,13 +430,24 @@ class _SearchPageState extends ConsumerState<SearchPage> {
         } else {
           // 首次搜索失败：显示全局错误
           _hasError = true;
-          _errorMessage = e.toString();
+          _searchError = e;
+          _searchErrorStack = s;
         }
       });
     }
   }
 
   Future<void> _loadMore() async {
+    if (_isLoadMoreFailed) return;
+    await _loadMoreCoordinator.loadMore(
+      loadMore: _loadMorePage,
+      hasMore: () => _hasMorePosts,
+      isActive: () => mounted,
+      progressCount: () => _allPosts.length,
+    );
+  }
+
+  Future<void> _loadMorePage() async {
     if (_isLoadingMore || !_hasMorePosts || _isLoadMoreFailed) return;
 
     setState(() {
@@ -440,6 +460,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
 
   void _clearSearch() {
     _searchController.clear();
+    _loadMoreCoordinator.resetCooldown();
     setState(() {
       _currentQuery = '';
       _standardPosts = [];
@@ -551,7 +572,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
             ),
             suffixIcon: _searchController.text.isNotEmpty
                 ? IconButton(
-                    icon: const Icon(Icons.close, size: 20),
+                    icon: const Icon(Symbols.close_rounded, size: 20),
                     onPressed: _clearSearch,
                   )
                 : null,
@@ -562,7 +583,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.search),
+            icon: const Icon(Symbols.search_rounded),
             onPressed: () => _onSearch(_searchController.text),
             tooltip: context.l10n.common_search,
           ),
@@ -570,7 +591,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
           Stack(
             children: [
               IconButton(
-                icon: const Icon(Icons.tune),
+                icon: const Icon(Symbols.tune_rounded),
                 onPressed: _openFilterPanel,
                 tooltip: context.l10n.search_advancedSearch,
               ),
@@ -673,7 +694,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.search, size: 64, color: theme.colorScheme.outline),
+          Icon(Symbols.search_rounded, size: 64, color: theme.colorScheme.outline),
           const SizedBox(height: 16),
           Text(
             context.l10n.search_emptyHint,
@@ -709,7 +730,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
         child: Row(
           children: [
             Icon(
-              Icons.history,
+              Symbols.history_rounded,
               size: 20,
               color: theme.colorScheme.onSurfaceVariant,
             ),
@@ -724,7 +745,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            Icon(Icons.north_west, size: 16, color: theme.colorScheme.outline),
+            Icon(Symbols.north_west_rounded, size: 16, color: theme.colorScheme.outline),
           ],
         ),
       ),
@@ -733,7 +754,11 @@ class _SearchPageState extends ConsumerState<SearchPage> {
 
   Widget _buildSearchResults(ThemeData theme) {
     if (_hasError && _allPosts.isEmpty) {
-      return _buildError(_errorMessage);
+      return ErrorView(
+        error: _searchError ?? Exception(context.l10n.search_error),
+        stackTrace: _searchErrorStack,
+        onRetry: _performSearch,
+      );
     }
 
     if (_allPosts.isEmpty && _allUsers.isEmpty && !_isLoadingMore) {
@@ -786,7 +811,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                       ),
                     ),
                   Icon(
-                    Icons.auto_awesome,
+                    Symbols.auto_awesome_rounded,
                     size: 16,
                     color:
                         ref.watch(searchSettingsProvider).sortOrder ==
@@ -848,7 +873,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
             itemCount:
                 _allPosts.length +
                 (_allUsers.isNotEmpty ? _allUsers.length + 1 : 0) +
-                (_isLoadingMore || _isLoadMoreFailed ? 1 : 0),
+                1,
             itemBuilder: (context, index) {
               // 帖子结果（标准 + AI 混合）
               if (index < _allPosts.length) {
@@ -928,74 +953,21 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                 }
               }
 
-              // 加载更多失败重试
-              if (_isLoadMoreFailed) {
-                return Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Center(
-                    child: GestureDetector(
-                      onTap: () {
-                        setState(() => _isLoadMoreFailed = false);
-                        _loadMore();
-                      },
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.refresh,
-                            size: 16,
-                            color: Theme.of(context).colorScheme.primary,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            context.l10n.common_loadFailedTapRetry,
-                            style: TextStyle(
-                              fontSize: 14,
-                              color: Theme.of(context).colorScheme.primary,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              }
-
-              // 加载更多指示器
-              if (_isLoadingMore) {
-                return const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Center(child: LoadingSpinner()),
-                );
-              }
-
-              return const SizedBox.shrink();
+              return PagedListFooter(
+                hasMore: _hasMorePosts,
+                isLoadingMore:
+                    _loadMoreCoordinator.isRunning && _isLoadingMore,
+                isLoadMoreFailed: _isLoadMoreFailed,
+                onRetry: () {
+                  _loadMoreCoordinator.resetCooldown();
+                  setState(() => _isLoadMoreFailed = false);
+                  _loadMore();
+                },
+              );
             },
           ),
         ),
       ],
-    );
-  }
-
-  Widget _buildError(String error) {
-    final theme = Theme.of(context);
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.error_outline, size: 48, color: theme.colorScheme.error),
-          const SizedBox(height: 16),
-          Text(context.l10n.search_error, style: theme.textTheme.titleMedium),
-          const SizedBox(height: 8),
-          Text(
-            error,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
     );
   }
 
@@ -1005,7 +977,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.search_off, size: 64, color: theme.colorScheme.outline),
+          Icon(Symbols.search_off_rounded, size: 64, color: theme.colorScheme.outline),
           const SizedBox(height: 16),
           Text(
             context.l10n.search_noResults,
@@ -1096,7 +1068,7 @@ class _SearchUserCard extends StatelessWidget {
                   ],
                 ),
               ),
-              Icon(Icons.chevron_right, color: theme.colorScheme.outline),
+              Icon(Symbols.chevron_right_rounded, color: theme.colorScheme.outline),
             ],
           ),
         ),

@@ -4,13 +4,11 @@ class ResolvedUploadUrl {
   final String url;
   final String? shortPath;
 
-  const ResolvedUploadUrl({
-    required this.url,
-    this.shortPath,
-  });
+  const ResolvedUploadUrl({required this.url, this.shortPath});
 
   String mediaUrl() {
-    if (url.contains('secure-media-uploads') || url.contains('secure-uploads')) {
+    if (url.contains('secure-media-uploads') ||
+        url.contains('secure-uploads')) {
       return UrlHelper.resolveUrl(url);
     }
 
@@ -19,7 +17,8 @@ class ResolvedUploadUrl {
 
   String linkUrl({required bool secureUploads}) {
     if (secureUploads &&
-        (url.contains('secure-media-uploads') || url.contains('secure-uploads'))) {
+        (url.contains('secure-media-uploads') ||
+            url.contains('secure-uploads'))) {
       return url;
     }
 
@@ -53,9 +52,18 @@ class UploadResult {
     this.extension,
   });
 
-  static final _imageExts = RegExp(r'\.(png|webp|jpe?g|gif|svg|ico|heic|heif|avif)$', caseSensitive: false);
-  static final _videoExts = RegExp(r'\.(mov|mp4|webm|m4v|3gp|ogv|avi|mpeg)$', caseSensitive: false);
-  static final _audioExts = RegExp(r'\.(mp3|og[ga]|opus|wav|m4[abpr]|aac|flac)$', caseSensitive: false);
+  static final _imageExts = RegExp(
+    r'\.(png|webp|jpe?g|gif|svg|ico|heic|heif|avif)$',
+    caseSensitive: false,
+  );
+  static final _videoExts = RegExp(
+    r'\.(mov|mp4|webm|m4v|3gp|ogv|avi|mpeg)$',
+    caseSensitive: false,
+  );
+  static final _audioExts = RegExp(
+    r'\.(mp3|og[ga]|opus|wav|m4[abpr]|aac|flac)$',
+    caseSensitive: false,
+  );
 
   bool get isImage => _imageExts.hasMatch(originalFilename);
   bool get isVideo => _videoExts.hasMatch(originalFilename);
@@ -117,9 +125,7 @@ class UploadResult {
 mixin _UploadsMixin on _DiscourseServiceBase {
   /// 获取图片请求头
   Future<Map<String, String>> getHeaders() async {
-    final headers = <String, String>{
-      'User-Agent': AppConstants.userAgent,
-    };
+    final headers = <String, String>{'User-Agent': AppConstants.userAgent};
 
     final cookies = await _cookieJar.getCookieHeader();
     if (cookies != null && cookies.isNotEmpty) {
@@ -132,19 +138,24 @@ mixin _UploadsMixin on _DiscourseServiceBase {
   /// 下载图片
   Future<Uint8List?> downloadImage(String url) async {
     try {
+      final isAppHost = CookieJarService.matchesAppHost(Uri.parse(url).host);
+      final extra = <String, dynamic>{'skipCsrf': true, 'skipAuthCheck': true};
+      if (isAppHost) {
+        extra[WebViewHttpAdapter.resourceKindExtraKey] =
+            WebViewHttpAdapter.resourceKindImage;
+        extra[WebViewHttpAdapter.cookieModeExtraKey] =
+            WebViewHttpAdapter.cookieModeReadOnly;
+      }
+
       final response = await _dio.get(
         url,
-        options: Options(
-          responseType: ResponseType.bytes,
-          extra: {
-            'skipCsrf': true,
-            'skipAuthCheck': true,
-          },
-        ),
+        options: Options(responseType: ResponseType.bytes, extra: extra),
       );
 
       if (response.data is! List<int>) {
-        debugPrint('[DiscourseService] Invalid response data type for image: $url');
+        debugPrint(
+          '[DiscourseService] Invalid response data type for image: $url',
+        );
         return null;
       }
 
@@ -157,12 +168,16 @@ mixin _UploadsMixin on _DiscourseServiceBase {
 
       final contentType = response.headers.value('content-type')?.toLowerCase();
       if (contentType != null && !contentType.startsWith('image/')) {
-        debugPrint('[DiscourseService] Invalid content-type for image: $contentType, url: $url');
+        debugPrint(
+          '[DiscourseService] Invalid content-type for image: $contentType, url: $url',
+        );
         return null;
       }
 
       if (!_isValidImageData(bytes)) {
-        debugPrint('[DiscourseService] Invalid image data (magic bytes check failed): $url');
+        debugPrint(
+          '[DiscourseService] Invalid image data (magic bytes check failed): $url',
+        );
         return null;
       }
 
@@ -178,7 +193,10 @@ mixin _UploadsMixin on _DiscourseServiceBase {
     if (bytes.length < 4) return false;
 
     // PNG
-    if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) {
+    if (bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47) {
       return true;
     }
 
@@ -188,14 +206,23 @@ mixin _UploadsMixin on _DiscourseServiceBase {
     }
 
     // GIF
-    if (bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38) {
+    if (bytes[0] == 0x47 &&
+        bytes[1] == 0x49 &&
+        bytes[2] == 0x46 &&
+        bytes[3] == 0x38) {
       return true;
     }
 
     // WebP
     if (bytes.length >= 12 &&
-        bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 &&
-        bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) {
+        bytes[0] == 0x52 &&
+        bytes[1] == 0x49 &&
+        bytes[2] == 0x46 &&
+        bytes[3] == 0x46 &&
+        bytes[8] == 0x57 &&
+        bytes[9] == 0x45 &&
+        bytes[10] == 0x42 &&
+        bytes[11] == 0x50) {
       return true;
     }
 
@@ -205,7 +232,10 @@ mixin _UploadsMixin on _DiscourseServiceBase {
     }
 
     // ICO
-    if (bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0x01 && bytes[3] == 0x00) {
+    if (bytes[0] == 0x00 &&
+        bytes[1] == 0x00 &&
+        bytes[2] == 0x01 &&
+        bytes[3] == 0x00) {
       return true;
     }
 
@@ -230,7 +260,13 @@ mixin _UploadsMixin on _DiscourseServiceBase {
           '/uploads.json',
           queryParameters: {'client_id': MessageBusService().clientId},
           data: formData,
-          options: Options(extra: {'showErrorToast': attempt >= maxRetries}),  // 仅最后一次尝试才弹 toast
+          options: Options(
+            extra: {
+              'showErrorToast': attempt >= maxRetries,
+              WebViewHttpAdapter.resourceKindExtraKey:
+                  WebViewHttpAdapter.resourceKindUpload,
+            },
+          ), // 仅最后一次尝试才弹 toast
         );
 
         final data = response.data;
@@ -311,39 +347,101 @@ mixin _UploadsMixin on _DiscourseServiceBase {
   /// 上传图片（uploadFile 的别名，保持向后兼容）
   Future<UploadResult> uploadImage(String filePath) => uploadFile(filePath);
 
-  /// 批量解析 short_url
+  /// 批量解析 short_url（内置速率限制重试，对齐 uploadFile）
   Future<List<Map<String, dynamic>>> lookupUrls(List<String> shortUrls) async {
-    final missingUrls = shortUrls.where((url) => !_urlCache.containsKey(url)).toList();
+    final missingUrls = shortUrls
+        .where((url) => !_urlCache.containsKey(url))
+        .toList();
 
     if (missingUrls.isEmpty) return [];
 
-    try {
-      final response = await _dio.post(
-        '/uploads/lookup-urls',
-        data: {'short_urls': missingUrls},
-      );
+    const maxRetries = 3;
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        final response = await _dio.post(
+          '/uploads/lookup-urls',
+          data: {'short_urls': missingUrls},
+        );
 
-      final List<dynamic> uploads = response.data;
-      final result = <Map<String, dynamic>>[];
+        final List<dynamic> uploads = response.data;
+        final result = <Map<String, dynamic>>[];
 
-      for (final item in uploads) {
-        if (item is Map<String, dynamic>) {
-          result.add(item);
-          final shortUrl = item['short_url'] as String?;
-          final url = item['url'] as String?;
-          if (shortUrl != null && url != null) {
-            _urlCache[shortUrl] = ResolvedUploadUrl(
-              url: url,
-              shortPath: item['short_path'] as String?,
-            );
+        for (final item in uploads) {
+          if (item is Map<String, dynamic>) {
+            result.add(item);
+            final shortUrl = item['short_url'] as String?;
+            final url = item['url'] as String?;
+            if (shortUrl != null && url != null) {
+              _urlCache[shortUrl] = ResolvedUploadUrl(
+                url: url,
+                shortPath: item['short_path'] as String?,
+              );
+            }
           }
         }
+        return result;
+      } on DioException catch (e) {
+        // ErrorInterceptor 将 429 throw 为 RateLimitException，
+        // Dio 会将其包装在 DioException.error 中
+        final innerError = e.error;
+        if (innerError is RateLimitException && attempt < maxRetries) {
+          final waitSeconds = innerError.retryAfterSeconds ?? 5;
+          debugPrint(
+            '[DiscourseService] lookupUrls 速率限制，等待 ${waitSeconds}s 后重试 '
+            '(${attempt + 1}/$maxRetries)',
+          );
+          await Future.delayed(Duration(seconds: waitSeconds));
+          continue;
+        }
+        debugPrint('[DiscourseService] lookupUrls failed: $e');
+        return [];
+      } catch (e) {
+        debugPrint('[DiscourseService] lookupUrls failed: $e');
+        return [];
       }
-      return result;
-    } catch (e) {
-      debugPrint('[DiscourseService] lookupUrls failed: $e');
-      return [];
     }
+    return [];
+  }
+
+  /// 微批量合并窗口内待解析的 short_url（与 _pendingLookupCompleter 同生命周期）
+  List<String>? _pendingLookupBatch;
+  Completer<void>? _pendingLookupCompleter;
+
+  /// 进行中的解析请求（同一 short_url 共享同一个 Future，避免重复请求）
+  final Map<String, Future<void>> _inflightLookups = {};
+
+  /// 将单条解析请求合并进微批量窗口：
+  /// 同一帧/短时间内多张图片各自触发的解析会合并为一次 lookup-urls 请求，
+  /// 避免上传多张图后瞬时并发多个 POST 触发速率限制
+  Future<void> _lookupBatched(String shortUrl) {
+    final inflight = _inflightLookups[shortUrl];
+    if (inflight != null) return inflight;
+
+    if (_pendingLookupBatch == null) {
+      final batch = <String>[];
+      final completer = Completer<void>();
+      _pendingLookupBatch = batch;
+      _pendingLookupCompleter = completer;
+
+      Future.delayed(const Duration(milliseconds: 50), () async {
+        // 关闭收集窗口，后续请求进入下一批
+        _pendingLookupBatch = null;
+        _pendingLookupCompleter = null;
+        try {
+          await lookupUrls(batch);
+        } finally {
+          for (final url in batch) {
+            _inflightLookups.remove(url);
+          }
+          completer.complete();
+        }
+      });
+    }
+
+    _pendingLookupBatch!.add(shortUrl);
+    final future = _pendingLookupCompleter!.future;
+    _inflightLookups[shortUrl] = future;
+    return future;
   }
 
   /// 解析单个 short_url
@@ -356,7 +454,7 @@ mixin _UploadsMixin on _DiscourseServiceBase {
       return _urlCache[shortUrl];
     }
 
-    await lookupUrls([shortUrl]);
+    await _lookupBatched(shortUrl);
     return _urlCache[shortUrl];
   }
 
@@ -373,7 +471,8 @@ mixin _UploadsMixin on _DiscourseServiceBase {
     final resolved = await resolveShortUpload(shortUrl);
     if (resolved == null) return null;
 
-    final secureUploads = PreloadedDataService().siteSettingsSync?['secure_uploads'] == true;
+    final secureUploads =
+        PreloadedDataService().siteSettingsSync?['secure_uploads'] == true;
     return resolved.linkUrl(secureUploads: secureUploads);
   }
 }
