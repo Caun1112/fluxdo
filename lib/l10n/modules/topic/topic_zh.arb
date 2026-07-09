@@ -15,6 +15,7 @@
   "topicDetail_loading": "加载中...",
   "topicDetail_moreOptions": "更多选项",
   "topicDetail_openInBrowser": "在浏览器打开",
+  "topicDetail_readBoost": "ReadBoost",
   "topicDetail_readLaterFull": "浮窗已满（最多 {max} 个）",
   "@topicDetail_readLaterFull": {
     "placeholders": {
@@ -49,6 +50,32 @@
   "topicDetail_topLevelOnly": "只看顶层",
   "topicDetail_viewAll": "查看全部",
   "topicDetail_viewsLabel": "浏览",
+  "readBoost_acceptRisk": "我明白风险并启用",
+  "readBoost_autoStart": "进入帖子后自动运行",
+  "readBoost_baseDelay": "基础延迟（毫秒）",
+  "readBoost_currentPosition": "当前位置：{current}/{total}",
+  "@readBoost_currentPosition": {
+    "placeholders": {
+      "current": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "readBoost_maxReadTime": "最大阅读时间（毫秒）",
+  "readBoost_maxReqSize": "最大每批请求量",
+  "readBoost_minReadTime": "最小阅读时间（毫秒）",
+  "readBoost_minReqSize": "最小每批请求量",
+  "readBoost_randomDelayRange": "随机延迟范围（毫秒）",
+  "readBoost_resetDefaults": "重置默认",
+  "readBoost_riskWarning": "ReadBoost 会主动向站点提交批量阅读时长，用来提升已读楼层数量。这可能违反站点规则，并带来账号被限制或封禁的风险。请确认你理解并自行承担风险。",
+  "readBoost_saveSettings": "保存设置",
+  "readBoost_settingsSaved": "ReadBoost 设置已保存",
+  "readBoost_start": "开始执行",
+  "readBoost_startFromCurrent": "从当前浏览位置开始",
+  "readBoost_stop": "停止执行",
   "topicSort_activity": "活跃度",
   "topicSort_created": "创建时间",
   "topicSort_default": "默认",

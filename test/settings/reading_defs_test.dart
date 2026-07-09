@@ -11,6 +11,20 @@ Future<List<SettingsModel>> _pumpAndCollectBasicItems(
   required Size size,
   bool? desktopOverride,
 }) async {
+  return _pumpAndCollectItems(
+    tester,
+    size: size,
+    desktopOverride: desktopOverride,
+    groupTitleBuilder: (context) => context.l10n.preferences_basic,
+  );
+}
+
+Future<List<SettingsModel>> _pumpAndCollectItems(
+  WidgetTester tester, {
+  required Size size,
+  required String Function(BuildContext context) groupTitleBuilder,
+  bool? desktopOverride,
+}) async {
   addTearDown(() async {
     PlatformUtils.debugDesktopOverride = null;
   });
@@ -32,7 +46,9 @@ Future<List<SettingsModel>> _pumpAndCollectBasicItems(
           child: Builder(
             builder: (context) {
               items = buildReadingGroups(context)
-                  .firstWhere((group) => group.title == context.l10n.preferences_basic)
+                  .firstWhere(
+                    (group) => group.title == groupTitleBuilder(context),
+                  )
                   .items
                   .where((item) {
                     if (item is PlatformConditionalModel) {
@@ -40,7 +56,10 @@ Future<List<SettingsModel>> _pumpAndCollectBasicItems(
                     }
                     return true;
                   })
-                  .map((item) => item is PlatformConditionalModel ? item.inner : item)
+                  .map(
+                    (item) =>
+                        item is PlatformConditionalModel ? item.inner : item,
+                  )
                   .toList();
               return const SizedBox.shrink();
             },

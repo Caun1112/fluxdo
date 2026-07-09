@@ -50,6 +50,7 @@ import '../../widgets/content/discourse_html_content/discourse_html_content_widg
 import '../../providers/nested_topic_provider.dart';
 import 'controllers/topic_detail_controller.dart';
 import 'widgets/nested_post_list.dart';
+import 'widgets/read_boost_sheet.dart';
 import 'widgets/topic_detail_overlay.dart';
 import 'widgets/topic_post_list.dart';
 import 'widgets/topic_detail_header.dart';
@@ -178,6 +179,7 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
   bool _isSwitchingMode = false; // 切换热门回复模式
   bool _isNestedView = false; // 嵌套视图模式
   bool _defaultNestedViewApplied = false; // 默认嵌套视图配置是否已应用（依赖 detail 加载后判定）
+  bool _readBoostAutoStartTriggered = false;
   // 搜索相关
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
@@ -325,6 +327,42 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
         _showAiAssistantSheet(detail);
       }
     }
+  }
+
+  ReadBoostTopicInfo _readBoostTopicInfo(TopicDetail detail) {
+    final currentPostNumber =
+        _controller.scrollState.viewportPostNumber ??
+        detail.lastReadPostNumber ??
+        detail.postStream.posts.firstOrNull?.postNumber ??
+        1;
+    return ReadBoostTopicInfo(
+      topicId: detail.id,
+      currentPosition: currentPostNumber.clamp(1, detail.postsCount).toInt(),
+      totalReplies: detail.postsCount,
+    );
+  }
+
+  void _showReadBoostSheet(TopicDetail detail) {
+    showDialog<void>(
+      context: context,
+      builder: (context) =>
+          ReadBoostSheet(topicInfo: _readBoostTopicInfo(detail)),
+    );
+  }
+
+  void _maybeAutoStartReadBoost(TopicDetail detail) {
+    if (_readBoostAutoStartTriggered) return;
+    final readBoostState = ref.read(readBoostProvider);
+    if (!readBoostState.config.autoStart ||
+        !readBoostState.config.hasAgreed ||
+        readBoostState.isRunning) {
+      return;
+    }
+    _readBoostAutoStartTriggered = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(readBoostProvider.notifier).start(_readBoostTopicInfo(detail));
+    });
   }
 
   void _registerPostShortcuts() {
@@ -859,7 +897,11 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
                   alignment: PlaceholderAlignment.middle,
                   child: Padding(
                     padding: const EdgeInsets.only(right: 4),
-                    child: Icon(Symbols.check_box_rounded, size: 18, color: Colors.green),
+                    child: Icon(
+                      Symbols.check_box_rounded,
+                      size: 18,
+                      color: Colors.green,
+                    ),
                   ),
                 ),
               ...EmojiText.buildEmojiSpans(
@@ -971,7 +1013,11 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
                 alignment: PlaceholderAlignment.middle,
                 child: Padding(
                   padding: const EdgeInsets.only(right: 4),
-                  child: Icon(Symbols.check_box_rounded, size: 16, color: Colors.green),
+                  child: Icon(
+                    Symbols.check_box_rounded,
+                    size: 16,
+                    color: Colors.green,
+                  ),
                 ),
               ),
             ...EmojiText.buildEmojiSpans(
@@ -1810,6 +1856,7 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     final params = _params;
     final searchState = ref.watch(topicSearchProvider(widget.topicId));
     final isSearchMode = searchState.isSearchMode;
+    final readBoostState = ref.watch(readBoostProvider);
 
     // 初始加载或切换模式时显示骨架屏
     // 注意：当 hasError 为 true 时，即使 isLoading 也为 true（AsyncLoading.copyWithPrevious 语义），
@@ -1857,6 +1904,7 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
         ],
       );
     } else if (detail != null) {
+      _maybeAutoStartReadBoost(detail);
       // 正常内容构建 (保持原有逻辑，但简化提取)
       content = _buildPostListContent(context, detail, notifier, isLoggedIn);
     }
@@ -1902,6 +1950,9 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
                     onExport: _showExportSheet,
                     onOpenInBrowser: _openInBrowser,
                     onReply: () => _handleReply(null),
+                    isReadBoostActive: readBoostState.isRunning,
+                    readBoostProgress: readBoostState.progress,
+                    onShowReadBoost: () => _showReadBoostSheet(detail),
                     onProgressTap: () => _showTimelineSheet(detail),
                     onProgressGesture: (action) =>
                         _handleProgressGesture(action, detail, notifier),

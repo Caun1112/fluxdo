@@ -15,6 +15,7 @@
   "topicDetail_loading": "Loading...",
   "topicDetail_moreOptions": "More options",
   "topicDetail_openInBrowser": "Open in browser",
+  "topicDetail_readBoost": "ReadBoost",
   "topicDetail_readLaterFull": "Float is full (max {max})",
   "topicDetail_removeFromReadLater": "Remove from float",
   "topicDetail_removeFromReadLaterSuccess": "Removed from float",
@@ -28,6 +29,32 @@
   "topicDetail_topLevelOnly": "Top-level only",
   "topicDetail_viewAll": "View all",
   "topicDetail_viewsLabel": "Views",
+  "readBoost_acceptRisk": "I understand the risk",
+  "readBoost_autoStart": "Run automatically after opening a topic",
+  "readBoost_baseDelay": "Base delay (ms)",
+  "readBoost_currentPosition": "Current position: {current}/{total}",
+  "@readBoost_currentPosition": {
+    "placeholders": {
+      "current": {
+        "type": "int"
+      },
+      "total": {
+        "type": "int"
+      }
+    }
+  },
+  "readBoost_maxReadTime": "Max read time (ms)",
+  "readBoost_maxReqSize": "Max batch size",
+  "readBoost_minReadTime": "Min read time (ms)",
+  "readBoost_minReqSize": "Min batch size",
+  "readBoost_randomDelayRange": "Random delay range (ms)",
+  "readBoost_resetDefaults": "Reset defaults",
+  "readBoost_riskWarning": "ReadBoost actively submits batched reading timings to the site to increase read post counts. This may violate site rules and may put your account at risk of restrictions or bans. Confirm only if you understand and accept the risk.",
+  "readBoost_saveSettings": "Save settings",
+  "readBoost_settingsSaved": "ReadBoost settings saved",
+  "readBoost_start": "Start",
+  "readBoost_startFromCurrent": "Start from current position",
+  "readBoost_stop": "Stop",
   "topicSort_activity": "Activity",
   "topicSort_created": "Created",
   "topicSort_default": "Default",

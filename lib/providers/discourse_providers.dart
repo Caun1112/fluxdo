@@ -1,5 +1,5 @@
 /// Discourse Providers
-/// 
+///
 /// 这个文件重新导出所有 Discourse 相关的 providers 和模型
 /// 保持向后兼容，其他文件可以继续使用 `import 'discourse_providers.dart'`
 library;
@@ -39,6 +39,9 @@ export 'sticker_provider.dart';
 
 // 会话未读状态相关
 export 'topic_session_provider.dart';
+
+// ReadBoost 批量阅读上报
+export 'read_boost_provider.dart';
 
 // 搜索设置相关
 export 'search_settings_provider.dart';

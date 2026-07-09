@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:app_icons/app_icons.dart';
+import '../../../l10n/s.dart';
 import '../../../models/topic.dart';
 import '../../../providers/preferences_provider.dart';
 import '../../../widgets/topic/topic_progress.dart';
@@ -20,6 +21,9 @@ class TopicDetailOverlay extends StatelessWidget {
   final VoidCallback? onExport;
   final VoidCallback onOpenInBrowser;
   final VoidCallback onReply;
+  final bool isReadBoostActive;
+  final double? readBoostProgress;
+  final VoidCallback onShowReadBoost;
   final VoidCallback onProgressTap;
   final ValueChanged<ProgressGestureAction>? onProgressGesture;
   final bool isSummaryMode;
@@ -46,6 +50,9 @@ class TopicDetailOverlay extends StatelessWidget {
     this.onExport,
     required this.onOpenInBrowser,
     required this.onReply,
+    required this.isReadBoostActive,
+    this.readBoostProgress,
+    required this.onShowReadBoost,
     required this.onProgressTap,
     this.onProgressGesture,
     this.isSummaryMode = false,
@@ -78,14 +85,47 @@ class TopicDetailOverlay extends StatelessWidget {
             left: 0,
             right: 0,
             child: Center(
-              child: TopicProgressGestures(
-                onAction: onProgressGesture ?? (_) {},
-                child: TopicProgress(
-                  currentIndex: currentStreamIndex,
-                  totalCount: totalCount,
-                  progressPercent: progressPercent,
-                  onTap: onProgressTap,
-                ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!showBottomBar) ...[
+                    _ReadBoostFloatingButton(
+                      isActive: isReadBoostActive,
+                      progress: readBoostProgress,
+                      onPressed: onShowReadBoost,
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  TopicProgressGestures(
+                    onAction: onProgressGesture ?? (_) {},
+                    child: TopicProgress(
+                      currentIndex: currentStreamIndex,
+                      totalCount: totalCount,
+                      progressPercent: progressPercent,
+                      onTap: onProgressTap,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (isNestedMode && !showBottomBar)
+          AnimatedPositioned(
+            key: const ValueKey('read_boost_fab_nested'),
+            duration: const Duration(milliseconds: 200),
+            left: 0,
+            right: 0,
+            bottom: 24 + bottomPadding,
+            child: Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _ReadBoostFloatingButton(
+                    isActive: isReadBoostActive,
+                    progress: readBoostProgress,
+                    onPressed: onShowReadBoost,
+                  ),
+                ],
               ),
             ),
           ),
@@ -102,6 +142,9 @@ class TopicDetailOverlay extends StatelessWidget {
             onShareAsImage: onShareAsImage,
             onExport: onExport,
             onOpenInBrowser: onOpenInBrowser,
+            isReadBoostActive: isReadBoostActive,
+            readBoostProgress: readBoostProgress,
+            onShowReadBoost: onShowReadBoost,
             hasSummary: detail.hasSummary,
             isSummaryMode: isSummaryMode,
             isAuthorOnlyMode: isAuthorOnlyMode,
@@ -132,6 +175,88 @@ class TopicDetailOverlay extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _ReadBoostFloatingButton extends StatelessWidget {
+  final bool isActive;
+  final double? progress;
+  final VoidCallback onPressed;
+
+  const _ReadBoostFloatingButton({
+    required this.isActive,
+    required this.progress,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final progressValue = progress?.clamp(0.0, 1.0).toDouble();
+    final hasProgress = progressValue != null;
+    final progressLabel = progressValue == null
+        ? null
+        : '${(progressValue * 100).round()}%';
+
+    return Tooltip(
+      message: context.l10n.topicDetail_readBoost,
+      child: Material(
+        elevation: 4,
+        shadowColor: Colors.black26,
+        color: isActive
+            ? theme.colorScheme.primaryContainer
+            : theme.colorScheme.surface,
+        shape: hasProgress
+            ? RoundedRectangleBorder(borderRadius: BorderRadius.circular(999))
+            : const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          child: hasProgress
+              ? SizedBox(
+                  width: 84,
+                  height: 40,
+                  child: Center(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          isActive
+                              ? Symbols.stop_circle_rounded
+                              : Symbols.rocket_launch_rounded,
+                          size: 20,
+                          color: isActive
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.onSurfaceVariant,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          progressLabel!,
+                          style: theme.textTheme.labelMedium?.copyWith(
+                            color: isActive
+                                ? theme.colorScheme.primary
+                                : theme.colorScheme.onSurfaceVariant,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : SizedBox.square(
+                  dimension: 40,
+                  child: Icon(
+                    isActive
+                        ? Symbols.stop_circle_rounded
+                        : Symbols.rocket_launch_rounded,
+                    color: isActive
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+        ),
+      ),
     );
   }
 }
