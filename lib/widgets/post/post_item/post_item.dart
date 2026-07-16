@@ -1,17 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:app_icons/app_icons.dart';
-import 'package:flutter/rendering.dart' show SelectedContent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:fluxdo_render/fluxdo_render.dart';
 import '../../../models/topic.dart';
-import '../../../pages/topic_detail_page/topic_detail_page.dart';
 import '../../../l10n/s.dart';
 import '../../../providers/preferences_provider.dart';
+import '../../../services/toast_service.dart';
+import '../../../utils/blocked_user_filter.dart';
 import '../../../utils/code_selection_context.dart';
-import '../../content/collapsed_html_content.dart';
-import '../../content/discourse_html_content/chunked/chunked_html_content.dart';
+import '../../../utils/fluxdo_render_callbacks.dart';
+import '../../../utils/frame_jank_monitor.dart';
 import '../post_boost/boost_danmaku.dart';
+import '../post_signature_block.dart';
 import '../small_action_item.dart';
 import 'quote_selection_helper.dart';
+import 'render_parse_cache.dart';
 import 'widgets/post_footer_section/post_footer_section.dart';
 import 'widgets/post_header_section.dart';
 import 'widgets/post_notice_widget.dart';
@@ -20,7 +23,13 @@ import 'widgets/post_segment_frame.dart';
 class PostItem extends ConsumerStatefulWidget {
   final Post post;
   final int topicId;
+
+  /// 话题分类 id,用于签名的 signatures_show_in_categories 门禁。
+  final int? categoryId;
   final void Function({String? initialContent})? onReply;
+
+  /// 头像长按菜单「@用户」回调（null = 不可回复，菜单不显示该项）
+  final void Function(String username)? onMentionUser;
   final VoidCallback? onLike;
   final VoidCallback? onEdit;
   final VoidCallback? onShareAsImage;
@@ -52,7 +61,9 @@ class PostItem extends ConsumerStatefulWidget {
     super.key,
     required this.post,
     required this.topicId,
+    this.categoryId,
     this.onReply,
+    this.onMentionUser,
     this.onLike,
     this.onEdit,
     this.onShareAsImage,
@@ -84,8 +95,7 @@ class PostItem extends ConsumerStatefulWidget {
 }
 
 class _PostItemState extends ConsumerState<PostItem> {
-  SelectedContent? _lastSelectedContent;
-  CodeSelectionContext? _lastCodeSelectionContext;
+  _ShortPostNewEngineRenderData? _newEngineRenderData;
   late bool _acceptedAnswer;
   final GlobalKey<PostFooterSectionState> _footerKey =
       GlobalKey<PostFooterSectionState>();
@@ -105,12 +115,44 @@ class _PostItemState extends ConsumerState<PostItem> {
     if (oldWidget.post != widget.post) {
       _acceptedAnswer = widget.post.acceptedAnswer;
     }
+    if (!identical(oldWidget.post, widget.post)) {
+      _newEngineRenderData = null;
+    }
+  }
+
+  _ShortPostNewEngineRenderData _newEngineDataFor(Post post) {
+    final cached = _newEngineRenderData;
+    if (cached != null && identical(cached.post, post)) return cached;
+
+    // 解析产物走全局 LRU(RenderParseCache):item 滚出 cacheExtent 被回收后
+    // 再滚回来,preprocess + DOM parse 直接命中,不重付(State 级缓存随
+    // dispose 丢失,来回滚动即反复解析 —— 之前滚动卡顿的主要来源之一)
+    final parsed = RenderParseCache.shortPost(post);
+    final callbacks = FluxdoRenderCallbacks.forPost(
+      post: post,
+      topicId: widget.topicId,
+      onQuoteImage: widget.onQuoteImage,
+      preprocessedCooked: parsed.preprocessed,
+      parsedNodes: parsed.nodes,
+    );
+    return _newEngineRenderData = _ShortPostNewEngineRenderData(
+      post: post,
+      preprocessedCooked: parsed.preprocessed,
+      parsedNodes: parsed.nodes,
+      callbacks: callbacks,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final post = widget.post;
     final theme = Theme.of(context);
+    // 帧内构建归因:JANK 大帧 detail 会列出本帧构建的帖子与正文大小,
+    // 区分"物化新帖成本 / rebuild 风暴 / GC·线程挤占"(监控关闭零开销)
+    FrameJankMonitor.noteBuild(
+      'post#${post.postNumber}/'
+      '${(post.cooked.length / 1000).toStringAsFixed(1)}k',
+    );
 
     if (post.postType == PostTypes.smallAction) {
       return SmallActionItem(post: post, selected: widget.selected);
@@ -119,13 +161,20 @@ class _PostItemState extends ConsumerState<PostItem> {
     final danmakuPref = ref.watch(
       preferencesProvider.select((p) => p.boostDanmaku),
     );
-    final hasBoosts = post.boosts?.isNotEmpty ?? false;
+    final blockedUsernames = ref.watch(
+      preferencesProvider.select((p) => p.normalizedBlockedUsernames),
+    );
+    final visibleBoosts = BlockedUserFilter.visibleBoosts(
+      post.boosts ?? const <Boost>[],
+      blockedUsernames,
+    );
+    final hasBoosts = visibleBoosts.isNotEmpty;
     final danmakuActive = danmakuPref && (_danmakuOverride ?? true);
     final showDanmaku = danmakuActive && hasBoosts;
     // 仅当全局开关开启且有 boost 时，才展示帖子级 toggle 按钮
     final showDanmakuToggle = danmakuPref && hasBoosts;
     // 按 boost 数量决定轨道数：1 条用 1 轨，2-4 用 2 轨，5+ 用 3 轨
-    final boostCount = post.boosts?.length ?? 0;
+    final boostCount = visibleBoosts.length;
     final danmakuTrackCount = boostCount <= 1
         ? 1
         : boostCount <= 4
@@ -158,6 +207,7 @@ class _PostItemState extends ConsumerState<PostItem> {
                 padding: EdgeInsets.zero,
                 onJumpToPost: widget.onJumpToPost,
                 onEditWiki: widget.onEdit,
+                onMentionUser: widget.onMentionUser,
                 danmakuActive: showDanmakuToggle ? showDanmaku : null,
                 onToggleDanmaku: showDanmakuToggle
                     ? () => setState(() {
@@ -201,59 +251,42 @@ class _PostItemState extends ConsumerState<PostItem> {
                       behavior: HitTestBehavior.translucent,
                       onPointerDown: (_) =>
                           CodeSelectionContextTracker.instance.clear(),
-                      child: ChunkedHtmlContent(
-                        html: post.cooked,
-                        textStyle: theme.textTheme.bodyMedium?.copyWith(
-                          height: 1.5,
-                          fontSize:
-                              (theme.textTheme.bodyMedium?.fontSize ?? 14) *
-                              ref.watch(preferencesProvider).contentFontScale,
-                        ),
-                        linkCounts: post.linkCounts,
-                        mentionedUsers: post.mentionedUsers,
-                        post: post,
-                        topicId: widget.topicId,
-                        onQuoteImage: widget.onQuoteImage,
-                        onInternalLinkTap: (topicId, topicSlug, postNumber) {
-                          Navigator.of(context).push(
-                            MaterialPageRoute(
-                              builder: (_) => TopicDetailPage(
-                                topicId: topicId,
-                                initialTitle: topicSlug,
-                                scrollToPostNumber: postNumber,
-                              ),
+                      child: Builder(
+                        builder: (_) {
+                          final data = _newEngineDataFor(post);
+                          // 新引擎自带自研逻辑选区(SelectionScope + 手势层 +
+                          // toolbar)。引用:toolbar 点「引用」→ onQuoteRequest
+                          // (plainText) → QuoteSelectionHelper 在原始 cooked 匹配。
+                          return data.callbacks.render(
+                            cookedHtml: data.preprocessedCooked,
+                            parsedNodes: data.parsedNodes,
+                            // 正文字号经 baseTextStyle 注入 contentFontScale
+                            // (此前新引擎分支未接入,顺带修复)。
+                            baseTextStyle: theme.textTheme.bodyMedium?.copyWith(
+                              height: 1.5,
+                              fontSize:
+                                  (theme.textTheme.bodyMedium?.fontSize ?? 14) *
+                                  ref.watch(preferencesProvider).contentFontScale,
+                            ),
+                            // 自研选区恒开(外层系统 SelectionArea 已拆):
+                            // 未登录时 onQuoteRequest 为 null,toolbar 自动
+                            // 降级只留「复制/复制引用」。
+                            selectionEnabled: true,
+                            onQuoteRequest: widget.onQuoteSelection == null
+                                ? null
+                                : (plainText) =>
+                                    widget.onQuoteSelection!(plainText, post),
+                            onCopyQuoteRequest: (plainText) =>
+                                QuoteSelectionHelper.copyQuoteToClipboard(
+                              selectedText: plainText,
+                              post: post,
+                              topicId: widget.topicId,
+                            ),
+                            onCopyToast: () => ToastService.showSuccess(
+                              context.l10n.common_copiedToClipboard,
                             ),
                           );
                         },
-                        onSelectionChanged: widget.onQuoteSelection != null
-                            ? (content) {
-                                _lastSelectedContent = content;
-                                _lastCodeSelectionContext = content == null
-                                    ? null
-                                    : CodeSelectionContextTracker
-                                          .instance
-                                          .current;
-                              }
-                            : null,
-                        contextMenuBuilder: widget.onQuoteSelection != null
-                            ? (context, state) {
-                                final items =
-                                    QuoteSelectionHelper.buildMenuItems(
-                                      baseItems: state.contextMenuButtonItems,
-                                      plainText:
-                                          _lastSelectedContent?.plainText,
-                                      post: post,
-                                      hideToolbar: state.hideToolbar,
-                                      topicId: widget.topicId,
-                                      onQuoteSelection: widget.onQuoteSelection,
-                                      codeContext: _lastCodeSelectionContext,
-                                    );
-                                return AdaptiveTextSelectionToolbar.buttonItems(
-                                  anchors: state.contextMenuAnchors,
-                                  buttonItems: items,
-                                );
-                              }
-                            : null,
                       ),
                     ),
                   ),
@@ -261,12 +294,15 @@ class _PostItemState extends ConsumerState<PostItem> {
                     Positioned.fill(
                       child: BoostDanmaku(
                         visibilityKey: post.id,
-                        boosts: post.boosts!,
+                        boosts: visibleBoosts,
                         maxTrackCount: danmakuTrackCount,
                         trackHeight: danmakuTrackHeight,
                         highlightUsername: widget.highlightBoostUsername,
-                        onBoostTap: (boost) {
-                          _footerKey.currentState?.showBoostActions(boost);
+                        onBoostTap: (boost, anchorRect) {
+                          _footerKey.currentState?.showBoostActions(
+                            boost,
+                            anchorRect: anchorRect,
+                          );
                         },
                       ),
                     ),
@@ -274,38 +310,12 @@ class _PostItemState extends ConsumerState<PostItem> {
               ),
             ),
             // 用户签名
-            if (ref.watch(preferencesProvider).showSignatures &&
-                post.signatureCooked != null &&
-                post.signatureCooked!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: SelectionContainer.disabled(
-                  child: Container(
-                    padding: const EdgeInsets.only(top: 8),
-                    decoration: BoxDecoration(
-                      border: Border(
-                        top: BorderSide(
-                          color: theme.colorScheme.outlineVariant.withValues(
-                            alpha: 0.3,
-                          ),
-                          width: 0.5,
-                        ),
-                      ),
-                    ),
-                    child: CollapsedHtmlContent(
-                      html: post.signatureCooked!,
-                      textStyle: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant.withValues(
-                          alpha: 0.6,
-                        ),
-                        fontSize: 12,
-                        height: 1.4,
-                      ),
-                      maxLines: 2,
-                    ),
-                  ),
-                ),
-              ),
+            if (PostSignatureBlock.shouldRender(
+              ref,
+              post,
+              categoryId: widget.categoryId,
+            ))
+              PostSignatureBlock(post: post, categoryId: widget.categoryId),
             // 举报隐藏帖子：显示展开按钮
             if (post.cookedHidden &&
                 post.canSeeHiddenPost &&
@@ -379,4 +389,18 @@ class _PostItemState extends ConsumerState<PostItem> {
       ),
     );
   }
+}
+
+class _ShortPostNewEngineRenderData {
+  final Post post;
+  final String preprocessedCooked;
+  final List<BlockNode> parsedNodes;
+  final FluxdoRenderCallbacks callbacks;
+
+  const _ShortPostNewEngineRenderData({
+    required this.post,
+    required this.preprocessedCooked,
+    required this.parsedNodes,
+    required this.callbacks,
+  });
 }

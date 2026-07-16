@@ -11,8 +11,10 @@ import '../services/update_checker_helper.dart';
 import '../services/update_service.dart';
 import '../l10n/s.dart';
 import '../utils/dialog_utils.dart';
+import 'package:common_ui/common_ui.dart';
 import '../widgets/update_dialog.dart';
 import 'app_logs_page.dart';
+import 'perf_diagnostics_page.dart';
 
 class AboutPage extends StatefulWidget {
   const AboutPage({super.key});
@@ -235,64 +237,90 @@ class _AboutPageState extends State<AboutPage> {
 
           // Action List
           _buildSectionTitle(context, context.l10n.about_info),
-          _buildListTile(
-            context,
-            icon: Symbols.update_rounded,
-            title: context.l10n.about_checkUpdate,
-            onTap: _checkForUpdate,
-          ),
-          _buildListTile(
-            context,
-            icon: Symbols.description_rounded,
-            title: context.l10n.about_openSourceLicense,
-            onTap: () => showLicensePage(
-              context: context,
-              applicationName: 'FluxDO',
-              applicationVersion: _version,
-              applicationLegalese: context.l10n.about_legalese,
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: SegmentedCardGroup(
+              children: [
+                _buildListTile(
+                  context,
+                  icon: Symbols.update_rounded,
+                  title: context.l10n.about_checkUpdate,
+                  onTap: _checkForUpdate,
+                ),
+                _buildListTile(
+                  context,
+                  icon: Symbols.description_rounded,
+                  title: context.l10n.about_openSourceLicense,
+                  onTap: () => showLicensePage(
+                    context: context,
+                    applicationName: 'FluxDO',
+                    applicationVersion: _version,
+                    applicationLegalese: context.l10n.about_legalese,
+                  ),
+                ),
+              ],
             ),
           ),
 
-          const Divider(height: 32, indent: 16, endIndent: 16),
+          const SizedBox(height: 24),
 
           _buildSectionTitle(context, context.l10n.about_develop),
-          if (_developerMode)
-            SwitchListTile(
-              title: Text(context.l10n.about_developerMode),
-              subtitle: Text(context.l10n.about_tapToDisableDeveloperMode),
-              value: true,
-              onChanged: (value) {
-                if (!value) {
-                  _setDeveloperMode(false);
-                }
-              },
-            ),
-          _buildListTile(
-            context,
-            icon: Symbols.code_rounded,
-            title: context.l10n.about_sourceCode,
-            subtitle: 'GitHub',
-            onTap: () => launchUrl(
-              Uri.parse('https://github.com/Lingyan000/fluxdo'),
-              mode: LaunchMode.externalApplication,
-            ),
-          ),
-          _buildListTile(
-            context,
-            icon: Symbols.article_rounded,
-            title: context.l10n.about_appLogs,
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const AppLogsPage()),
-            ),
-          ),
-          _buildListTile(
-            context,
-            icon: Symbols.bug_report_rounded,
-            title: context.l10n.about_feedback,
-            onTap: () => launchUrl(
-              Uri.parse('https://github.com/Lingyan000/fluxdo/issues'),
-              mode: LaunchMode.externalApplication,
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: SegmentedCardGroup(
+              children: [
+                if (_developerMode)
+                  SwitchListTile(
+                    title: Text(context.l10n.about_developerMode),
+                    subtitle: Text(context.l10n.about_tapToDisableDeveloperMode),
+                    value: true,
+                    onChanged: (value) {
+                      if (!value) {
+                        _setDeveloperMode(false);
+                      }
+                    },
+                  ),
+                _buildListTile(
+                  context,
+                  icon: Symbols.code_rounded,
+                  title: context.l10n.about_sourceCode,
+                  subtitle: 'GitHub',
+                  onTap: () => launchUrl(
+                    Uri.parse('https://github.com/Lingyan000/fluxdo'),
+                    mode: LaunchMode.externalApplication,
+                  ),
+                ),
+                _buildListTile(
+                  context,
+                  icon: Symbols.article_rounded,
+                  title: context.l10n.about_appLogs,
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const AppLogsPage()),
+                  ),
+                ),
+                // 性能诊断(开发者向工具,文案暂不接入 l10n)
+                _buildListTile(
+                  context,
+                  icon: Symbols.speed_rounded,
+                  title: '性能诊断',
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const PerfDiagnosticsPage(),
+                    ),
+                  ),
+                ),
+                _buildListTile(
+                  context,
+                  icon: Symbols.bug_report_rounded,
+                  title: context.l10n.about_feedback,
+                  onTap: () => launchUrl(
+                    Uri.parse('https://github.com/Lingyan000/fluxdo/issues'),
+                    mode: LaunchMode.externalApplication,
+                  ),
+                ),
+              ],
             ),
           ),
 
@@ -332,7 +360,7 @@ class _AboutPageState extends State<AboutPage> {
     required VoidCallback onTap,
   }) {
     return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 4),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       leading: Icon(icon, color: Theme.of(context).colorScheme.onSurfaceVariant),
       title: Text(title),
       subtitle: subtitle != null ? Text(subtitle) : null,

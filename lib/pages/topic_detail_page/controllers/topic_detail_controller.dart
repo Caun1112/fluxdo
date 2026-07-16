@@ -195,8 +195,12 @@ class TopicDetailController extends ChangeNotifier {
   void handleScroll() {
     onScrolled?.call();
 
+    // center 坐标系下 before 区是负 offset，"离顶距离"须相对 minScrollExtent
     final shouldShowBackToTop =
-        scrollController.hasClients && scrollController.position.pixels > 300;
+        scrollController.hasClients &&
+        scrollController.position.pixels -
+                scrollController.position.minScrollExtent >
+            300;
     if (shouldShowBackToTop != _scrollState.showBackToTop) {
       _updateScrollState(
         _scrollState.copyWith(showBackToTop: shouldShowBackToTop),
@@ -381,7 +385,7 @@ class TopicDetailController extends ChangeNotifier {
   }
 
   /// 本地跳转到帖子（不重新请求，仅重置视图中心）
-  void jumpToPostLocally(int postNumber, {int? anchorPostNumber}) {
+  void jumpToPostLocally(int postNumber) {
     // 重置可见性数据
     resetVisibility();
 
@@ -390,7 +394,7 @@ class TopicDetailController extends ChangeNotifier {
         hasInitialScrolled: false,
         isPositioned: false,
         jumpTargetPostNumber: postNumber,
-        initialCenterPostNumber: anchorPostNumber ?? postNumber,
+        initialCenterPostNumber: postNumber,
         keyboardSelectedPostNumber: postNumber,
       ),
     );

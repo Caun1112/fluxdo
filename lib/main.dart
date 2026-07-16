@@ -3,12 +3,17 @@ import 'dart:io';
 
 import 'package:catcher_2/catcher_2.dart';
 import 'package:chinese_font_library/chinese_font_library.dart';
+import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show GestureBinding;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:native_animated_image/native_animated_image.dart'
+    show NativeAnimatedImageProvider;
 import 'package:window_manager/window_manager.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:flutter_acrylic/flutter_acrylic.dart' as acrylic;
 import 'pages/topics_page.dart';
 import 'pages/data_management_page.dart';
@@ -21,6 +26,7 @@ import 'providers/app_state_refresher.dart';
 import 'services/highlighter_service.dart';
 import 'widgets/common/notification_icon_button.dart';
 import 'widgets/common/clipboard_topic_link_snack_content.dart';
+import 'widgets/common/predictive_back_cupertino_transitions.dart';
 import 'package:flutter_displaymode/flutter_displaymode.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'services/network/cookie/csrf_token_service.dart';
@@ -49,6 +55,8 @@ import 'services/update_service.dart';
 import 'services/update_checker_helper.dart';
 import 'services/clipboard_topic_link_service.dart';
 import 'services/deep_link_service.dart';
+import 'services/windows_protocol_registrar_stub.dart'
+    if (dart.library.ffi) 'services/windows_protocol_registrar_io.dart';
 import 'services/background/background_notification_service.dart';
 import 'services/message_bus_service.dart';
 import 'services/connectivity_service.dart';
@@ -66,6 +74,9 @@ import 'models/user.dart';
 import 'constants.dart';
 import 'providers/connectivity_provider.dart';
 import 'utils/dialog_utils.dart';
+import 'utils/frame_jank_monitor.dart';
+import 'utils/image_decode_gate.dart';
+import 'utils/scroll_busy_signal.dart';
 import 'utils/time_utils.dart';
 
 import 'package:shared_preferences/shared_preferences.dart';
@@ -126,7 +137,44 @@ Future<void> _applyAndroidDisplayMode(SharedPreferences prefs) async {
 }
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  // 自定义 binding:接管标准图片解码入口,全局限制解码并发(= 限制
+  // Impeller 纹理上传并发,图密话题快滚 raster 尖峰的对症闸门,
+  // 见 image_decode_gate.dart)。
+  FluxdoWidgetsBinding.ensureInitialized();
+
+  // Rust 动图管线的首帧(挂载瞬态的裸 RGBA 上传,不经 binding)注入
+  // 同一个闸门,与标准路径统一错峰;播放中的后续帧不过闸。
+  NativeAnimatedImageProvider.firstFrameGate = ImageDecodeGate.run;
+
+  // 触摸重采样:把 pointer 事件重采样到与 vsync 对齐。触摸采样率与
+  // 显示刷新率不同步(如 120Hz 触摸 × 60Hz 显示)时,滚动速度会微观
+  // 不均匀,表现为"不跟手/画面不连贯"。代价是约一帧的输入延迟,
+  // 高刷设备上是标准取舍。
+  GestureBinding.instance.resamplingEnabled = true;
+
+  // 掉帧监控:debug/profile 无条件启用;release 由"性能诊断"设置开关
+  // 控制(见下方 prefs 读取处)。Logcat 过滤 "JANK",或在设置 → 性能诊断
+  // 页内直接查看与导出。不要用开着 DevTools Performance 页的体感判断
+  // 卡顿(观察者效应)。
+  if (!kReleaseMode) {
+    FrameJankMonitor.start();
+  }
+
+  // 定位构建热点用(仅 debug/profile 生效,release 编译器自动剔除):
+  // 打开后 DevTools timeline 的 BUILD 段内会显示每个 widget 的耗时,
+  // 用于追查"重楼层挂载 build 35ms"的具体构成。事件量大,录制请控制
+  // 在 10 秒以内,定位完成后删除。
+  if (!kReleaseMode) {
+    debugProfileBuildsEnabled = true;
+  }
+
+  // 桌面端(Windows/Linux)图片缓存索引走 sqlite,需 FFI 提供 sqlite3;移动端 /
+  // macOS 用各自原生 sqflite(flutter_cache_manager 已带),无需处理。必须在任何
+  // 数据库操作(CacheManager / migration)之前设好 databaseFactory。
+  if (Platform.isWindows || Platform.isLinux) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
 
   // Release 模式下禁用 debugPrint 输出：全项目有数百处 debugPrint 调试输出，
   // 它们在 release 下默认仍会写 logcat/console，徒增 I/O 开销。
@@ -171,6 +219,9 @@ Future<void> main() async {
     ProxyCertificate.initialize(),
     if (Platform.isWindows)
       WindowsWebViewEnvironmentService.instance.initialize(),
+    // Windows 深链协议注册(discourse:// / fluxdo://):写 HKCU 免管理员,
+    // 幂等,失败不阻塞启动。其他平台由清单/plist 声明,此调用为 no-op。
+    if (Platform.isWindows) ensureWindowsProtocolsRegistered(),
     CookieJarService().initialize(),
     CsrfTokenService().init(),
     BackgroundNotificationService().initialize(),
@@ -187,6 +238,11 @@ Future<void> main() async {
   final results = await Future.wait(futures);
   final prefs = results[0] as SharedPreferences;
   await AuthIssueNoticeService.instance.initialize(prefs);
+
+  // release 下按设置开关启用性能监控(debug/profile 已在上方无条件启用)
+  if (kReleaseMode && (prefs.getBool(FrameJankMonitor.prefKey) ?? false)) {
+    FrameJankMonitor.start();
+  }
 
   // v0.4.0: 注册 Cookie 引擎 DevTools service extensions (仅 debug/profile 模式)
   // 设计依据: docs/cookie-sync-design-v0.4.0.md §11.4
@@ -454,6 +510,26 @@ IconThemeData _appIconTheme(Color color) => IconThemeData(
   opticalSize: 24,
 );
 
+/// 页面转场:框架在 Android 的默认(PredictiveBack,常规导航兜底到
+/// FadeForwards)是入场/离场两页各套一个整页 FadeTransition —— Impeller
+/// 下每个半透明整页 = 一次全屏 saveLayer 离屏,且 Impeller 没有 Skia 的
+/// raster cache,转场每帧都在重光栅化两个页面。详情页↔列表页这种复杂
+/// 内容在 120Hz(8.3ms 预算)下每帧 raster 10~50ms,整段转场连串掉帧
+/// (诊断日志里 NAV 后成串的纯 raster 大帧,即"一般场景动不动抽")。
+/// 统一换 Cupertino 滑动转场:纯平移 + 边缘阴影,零整页 saveLayer。
+/// Android 用拷贝改造的 PredictiveBackCupertinoPageTransitionsBuilder:
+/// 系统预测返回手势保留原生 shared-element 预览,其余导航(push/按钮
+/// 返回)降级到 Cupertino 而非官方硬编码的 FadeForwards。
+const _pageTransitionsTheme = PageTransitionsTheme(
+  builders: <TargetPlatform, PageTransitionsBuilder>{
+    TargetPlatform.android: PredictiveBackCupertinoPageTransitionsBuilder(),
+    TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+    TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+    TargetPlatform.windows: CupertinoPageTransitionsBuilder(),
+    TargetPlatform.linux: CupertinoPageTransitionsBuilder(),
+  },
+);
+
 class MainApp extends ConsumerWidget {
   const MainApp({super.key});
 
@@ -507,7 +583,8 @@ class MainApp extends ConsumerWidget {
           child: Builder(
             builder: (context) => MaterialApp(
               navigatorKey: navigatorKey,
-              navigatorObservers: [appRouteObserver],
+              // JankNavObserver 给 [JANK] 日志加导航归因(debug/profile 观测用)
+              navigatorObservers: [appRouteObserver, JankNavObserver()],
               title: 'FluxDO',
               locale: TranslationProvider.of(context).flutterLocale,
               localizationsDelegates: const [
@@ -525,6 +602,7 @@ class MainApp extends ConsumerWidget {
                   colorScheme: lightScheme,
                   useMaterial3: true,
                   fontFamily: themeState.fontFamilyName,
+                  pageTransitionsTheme: _pageTransitionsTheme,
                   iconTheme: _appIconTheme(lightScheme.onSurface),
                   primaryIconTheme: _appIconTheme(lightScheme.onPrimary),
                   cardTheme: CardThemeData(
@@ -551,6 +629,7 @@ class MainApp extends ConsumerWidget {
                   colorScheme: darkScheme,
                   useMaterial3: true,
                   fontFamily: themeState.fontFamilyName,
+                  pageTransitionsTheme: _pageTransitionsTheme,
                   iconTheme: _appIconTheme(darkScheme.onSurface),
                   primaryIconTheme: _appIconTheme(darkScheme.onPrimary),
                   cardTheme: CardThemeData(
@@ -625,6 +704,19 @@ class MainApp extends ConsumerWidget {
                       UserPresenceService().markUserActivity(),
                   onPointerSignal: (_) =>
                       UserPresenceService().markUserActivity(),
+                  child: result,
+                );
+
+                // 全局滚动繁忙信号:后台维护任务(WebView cookie 轮询等
+                // 平台主线程 IPC)据此在滚动中让路,见 ScrollBusySignal
+                result = NotificationListener<ScrollNotification>(
+                  onNotification: (notification) {
+                    if (notification is ScrollUpdateNotification ||
+                        notification is ScrollStartNotification) {
+                      ScrollBusySignal.touch();
+                    }
+                    return false;
+                  },
                   child: result,
                 );
 

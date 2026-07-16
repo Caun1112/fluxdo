@@ -10,6 +10,7 @@ import '../utils/double_tap_zoom_controller.dart';
 import '../utils/hero_visibility_controller.dart';
 import '../utils/screenshot_utils.dart';
 import '../utils/svg_utils.dart';
+import '../widgets/content/animated_svg_view.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -57,8 +58,9 @@ class ImageViewerPage extends StatefulWidget {
     this.filenames,
   }) : assert(imageUrl != null || imageBytes != null);
 
-  /// 使用透明路由打开图片查看器
-  static void open(
+  /// 使用透明路由打开图片查看器。返回的 Future 在查看器关闭时完成
+  /// (调用方可借此恢复被隐藏的浮层等)。
+  static Future<void> open(
     BuildContext context,
     String imageUrl, {
     String? heroTag,
@@ -70,7 +72,7 @@ class ImageViewerPage extends StatefulWidget {
     List<String>? thumbnailUrls,
     List<String?>? filenames,
   }) {
-    Navigator.push(
+    return Navigator.push(
       context,
       PageRouteBuilder(
         opaque: false,
@@ -124,6 +126,15 @@ class _ImageViewerPageState extends State<ImageViewerPage>
   bool _showUI = true;
   final DiscourseCacheManager _cacheManager = DiscourseCacheManager();
 
+  /// 滑动关闭状态入口:loadStateChanged 用它判断"滑动进行中",冻结
+  /// loading→completed 的树切换(切换会销毁正在驱动滑动的手势载体,
+  /// pointer 流中断,本次滑动作废,表现为"滑动关闭停在某帧/需再滑一次")
+  final GlobalKey<ExtendedImageSlidePageState> _slidePageKey = GlobalKey();
+
+  /// 上一次 onSlidingPage 回调时是否在滑动(检测下降沿,滑动结束后
+  /// setState 让被冻结的 loading→completed 切换补齐)
+  bool _wasSlidingPage = false;
+
   /// 通知所有缓存页面当前活跃的 Hero 页码变化，确保只有当前页有 Hero
   late final ValueNotifier<int> _activeHeroPage;
 
@@ -135,6 +146,23 @@ class _ImageViewerPageState extends State<ImageViewerPage>
       return widget.heroTag;
     }
     return null;
+  }
+
+  /// 查看器主图解码上限:等比 clamp 到屏幕长边×3(且 ≤8192,常见 GPU
+  /// 纹理上限)。只有病态大图(8K 级手机直出原图)会被降采样 —— 全尺寸
+  /// 解码这类图会产生 100ms+ 的同步纹理上传,独占 raster 线程期间全 app
+  /// 掉帧(诊断实测单帧 raster 148ms、后续帧排队 300ms)。maxScale 4.0
+  /// 的放大浏览下该上限内清晰度无感知差异。
+  ImageProvider _clampedViewerProvider(String url) {
+    final view = View.of(context);
+    final longestPx =
+        (view.physicalSize.longestSide * 3).clamp(2048.0, 8192.0).round();
+    return ResizeImage(
+      discourseImageProvider(url),
+      width: longestPx,
+      height: longestPx,
+      policy: ResizeImagePolicy.fit,
+    );
   }
 
   @override
@@ -657,8 +685,19 @@ class _ImageViewerPageState extends State<ImageViewerPage>
           statusBarBrightness: Brightness.dark,
         ),
         child: ExtendedImageSlidePage(
+          key: _slidePageKey,
           slideAxis: SlideAxis.vertical, // 仅垂直滑动关闭，避免与左右切换图片冲突
           slideType: SlideType.onlyImage,
+          // 滑动结束下降沿:若滑动期间冻结过 loading→completed 树切换,
+          // 此刻补一次 setState 完成切换(见 _slidePageKey 注释)
+          onSlidingPage: (state) {
+            if (state.isSliding) {
+              _wasSlidingPage = true;
+            } else if (_wasSlidingPage) {
+              _wasSlidingPage = false;
+              if (mounted) setState(() {});
+            }
+          },
           // 只处理背景透明度，不干预关闭逻辑，让库自己处理 pop
           slidePageBackgroundHandler: (Offset offset, Size pageSize) {
             // 使用垂直偏移量计算背景透明度（与 slideAxis: vertical 匹配）
@@ -681,7 +720,7 @@ class _ImageViewerPageState extends State<ImageViewerPage>
                       position: details.globalPosition,
                     ),
                     child: ExtendedImage(
-                      image: discourseImageProvider(widget.imageUrl!),
+                      image: _clampedViewerProvider(widget.imageUrl!),
                       width: double.infinity,
                       height: double.infinity,
                       fit: BoxFit.contain,
@@ -741,6 +780,22 @@ class _ImageViewerPageState extends State<ImageViewerPage>
                               ),
                             );
                           }
+                          // 滑动关闭进行中不做 loading→completed 树切换:
+                          // 切换会销毁正在驱动滑动的手势载体,pointer 流
+                          // 中断、本次滑动作废(表现为图片停在半路,需再
+                          // 滑一次)。继续显示缩略图,滑动结束后由
+                          // onSlidingPage 下降沿补 setState 完成切换。
+                          if ((_slidePageKey.currentState?.isSliding ??
+                                  false) &&
+                              widget.thumbnailUrl != null &&
+                              widget.thumbnailUrl != widget.imageUrl) {
+                            return Image(
+                              image: discourseImageProvider(
+                                widget.thumbnailUrl!,
+                              ),
+                              fit: BoxFit.contain,
+                            );
+                          }
                         }
                         return null;
                       },
@@ -795,7 +850,7 @@ class _ImageViewerPageState extends State<ImageViewerPage>
                             }
 
                             return ExtendedImage(
-                              image: discourseImageProvider(url),
+                              image: _clampedViewerProvider(url),
                               mode: ExtendedImageMode.gesture,
                               enableSlideOutPage: true,
                               heroBuilderForSlidingPage: heroTag != null
@@ -851,6 +906,22 @@ class _ImageViewerPageState extends State<ImageViewerPage>
                                         imageInfo.image.width.toDouble(),
                                         imageInfo.image.height.toDouble(),
                                       ),
+                                    );
+                                  }
+                                  // 同单图:滑动关闭进行中冻结树切换,
+                                  // 滑动结束后 onSlidingPage 下降沿补切
+                                  if (_slidePageKey.currentState?.isSliding ??
+                                      false) {
+                                    if (thumbUrl != null && thumbUrl != url) {
+                                      return Image(
+                                        image: discourseImageProvider(
+                                          thumbUrl,
+                                        ),
+                                        fit: BoxFit.contain,
+                                      );
+                                    }
+                                    return const Center(
+                                      child: LoadingSpinner(),
                                     );
                                   }
                                 }
@@ -1081,6 +1152,7 @@ class _ImageDecodeFallback extends StatefulWidget {
 
 class _ImageDecodeFallbackState extends State<_ImageDecodeFallback> {
   ScalableImage? _svgSi;
+  String? _animatedSvgSource;
   bool _checked = false;
   bool _isSvg = false;
   bool _isAvif = false;
@@ -1100,7 +1172,19 @@ class _ImageDecodeFallbackState extends State<_ImageDecodeFallback> {
 
       // 1. 先检测 SVG
       if (_isSvgContent(bytes)) {
-        final svgString = SvgUtils.sanitize(String.fromCharCodes(bytes));
+        final raw = SvgUtils.decodeSvgBytes(bytes);
+        // 动画 SVG 走 full_svg_flutter;查看器是用户主动打开的单图,直接播
+        if (AnimatedSvgView.hasAnimations(raw)) {
+          if (mounted) {
+            setState(() {
+              _animatedSvgSource = raw;
+              _isSvg = true;
+              _checked = true;
+            });
+          }
+          return;
+        }
+        final svgString = SvgUtils.sanitize(raw);
         final si = ScalableImage.fromSvgString(svgString, warnF: (_) {});
         if (mounted) {
           setState(() {
@@ -1167,6 +1251,16 @@ class _ImageDecodeFallbackState extends State<_ImageDecodeFallback> {
 
   @override
   Widget build(BuildContext context) {
+    if (_isSvg && _animatedSvgSource != null) {
+      return Center(
+        child: AnimatedSvgView(
+          svgSource: _animatedSvgSource!,
+          alignment: Alignment.center,
+          autoPlay: true,
+        ),
+      );
+    }
+
     if (_isSvg && _svgSi != null) {
       return Center(
         child: ScalableImageWidget(si: _svgSi!, fit: BoxFit.contain),
@@ -1177,7 +1271,8 @@ class _ImageDecodeFallbackState extends State<_ImageDecodeFallback> {
       // 使用 AvifImageProvider 解码并渲染，自动支持动画 AVIF
       return Center(
         child: Image(
-          image: AvifImageProvider(widget.imageUrl),
+          // 查看器要原图清晰度,放开帖内默认的 2048 帧上限
+          image: AvifImageProvider(widget.imageUrl, maxDimension: null),
           fit: BoxFit.contain,
         ),
       );

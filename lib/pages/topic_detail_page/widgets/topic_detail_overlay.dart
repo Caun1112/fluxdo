@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:app_icons/app_icons.dart';
 import '../../../l10n/s.dart';
@@ -9,10 +10,16 @@ import 'topic_progress_gestures.dart';
 
 /// 话题详情页浮层
 /// 包含进度栏、底部操作栏和悬浮回复按钮
+///
+/// 滚动中高频变化的状态一律走 ValueListenable 细粒度下沉,不要提升为
+/// 本组件的构造参数(那会整棵重建底栏 + FAB,实测单次 6~7ms):
+/// - 楼层号([streamIndexListenable])→ 只重建 [TopicProgress]
+/// - 底栏显隐([showBottomBarListenable],滚动方向切换即翻转)→ 只重建
+///   三个 AnimatedPositioned 定位包装,内容经 VLB child 缓存整棵短路
 class TopicDetailOverlay extends StatelessWidget {
-  final bool showBottomBar;
+  final ValueListenable<bool> showBottomBarListenable;
   final bool isLoggedIn;
-  final int currentStreamIndex;
+  final ValueListenable<int> streamIndexListenable;
   final int totalCount;
   final TopicDetail detail;
   final VoidCallback onScrollToTop;
@@ -39,9 +46,9 @@ class TopicDetailOverlay extends StatelessWidget {
 
   const TopicDetailOverlay({
     super.key,
-    required this.showBottomBar,
+    required this.showBottomBarListenable,
     required this.isLoggedIn,
-    required this.currentStreamIndex,
+    required this.streamIndexListenable,
     required this.totalCount,
     required this.detail,
     required this.onScrollToTop,
@@ -70,72 +77,87 @@ class TopicDetailOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bottomPadding = MediaQuery.of(context).padding.bottom;
-    final progressPercent = totalCount > 1
-        ? (currentStreamIndex - 1) / (totalCount - 1)
-        : 0.0;
 
+    // 三块内容都不依赖 showBottomBar,只有 AnimatedPositioned 的 bottom
+    // 依赖 —— 用 VLB 的 child 参数把内容缓存住,滚动方向切换(底栏
+    // 显隐翻转,高频)时只重建定位包装,内容整棵短路(实测全量重建
+    // 一次 7.4ms,常与楼层挂载同帧叠加成 40ms 级大帧)。
     return Stack(
       children: [
-        // 固定的进度栏（嵌套模式下隐藏）
+        // 固定的进度栏（嵌套模式下隐藏）。楼层号变化只重建 TopicProgress,
+        // 手势层与定位动画不参与。
         if (!isNestedMode)
-          AnimatedPositioned(
-            key: const ValueKey('progress_bar'),
-            duration: const Duration(milliseconds: 200),
-            bottom: showBottomBar ? 96 : 24 + bottomPadding,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (!showBottomBar) ...[
-                    _ReadBoostFloatingButton(
-                      isActive: isReadBoostActive,
-                      progress: readBoostProgress,
-                      onPressed: onShowReadBoost,
-                    ),
-                    const SizedBox(width: 8),
-                  ],
-                  TopicProgressGestures(
-                    onAction: onProgressGesture ?? (_) {},
-                    child: TopicProgress(
+          ValueListenableBuilder<bool>(
+            valueListenable: showBottomBarListenable,
+            child: TopicProgressGestures(
+              onAction: onProgressGesture ?? (_) {},
+              child: RepaintBoundary(
+                // 楼层号滚动中连续变化,elevation Card 的阴影+抗锯齿裁剪
+                // 重绘不便宜(耗时榜 Card/_ShapeBorderPaint ~3ms);独立
+                // 图层后自身重绘不与列表脏区互相放大,底栏显隐的位移也
+                // 只是 layer offset 平移
+                child: ValueListenableBuilder<int>(
+                  valueListenable: streamIndexListenable,
+                  builder: (context, currentStreamIndex, _) {
+                    final progressPercent = totalCount > 1
+                        ? (currentStreamIndex - 1) / (totalCount - 1)
+                        : 0.0;
+                    return TopicProgress(
                       currentIndex: currentStreamIndex,
                       totalCount: totalCount,
                       progressPercent: progressPercent,
                       onTap: onProgressTap,
-                    ),
-                  ),
-                ],
+                    );
+                  },
+                ),
+              ),
+            ),
+            builder: (context, showBottomBar, child) => AnimatedPositioned(
+              key: const ValueKey('progress_bar'),
+              duration: const Duration(milliseconds: 200),
+              bottom: showBottomBar ? 96 : 24 + bottomPadding,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (!showBottomBar) ...[
+                      _ReadBoostFloatingButton(
+                        isActive: isReadBoostActive,
+                        progress: readBoostProgress,
+                        onPressed: onShowReadBoost,
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    child!,
+                  ],
+                ),
               ),
             ),
           ),
-        if (isNestedMode && !showBottomBar)
-          AnimatedPositioned(
-            key: const ValueKey('read_boost_fab_nested'),
-            duration: const Duration(milliseconds: 200),
-            left: 0,
-            right: 0,
-            bottom: 24 + bottomPadding,
+        if (isNestedMode)
+          ValueListenableBuilder<bool>(
+            valueListenable: showBottomBarListenable,
             child: Center(
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _ReadBoostFloatingButton(
-                    isActive: isReadBoostActive,
-                    progress: readBoostProgress,
-                    onPressed: onShowReadBoost,
-                  ),
-                ],
+              child: _ReadBoostFloatingButton(
+                isActive: isReadBoostActive,
+                progress: readBoostProgress,
+                onPressed: onShowReadBoost,
               ),
+            ),
+            builder: (context, showBottomBar, child) => AnimatedPositioned(
+              key: const ValueKey('read_boost_fab_nested'),
+              duration: const Duration(milliseconds: 200),
+              left: 0,
+              right: 0,
+              bottom: showBottomBar ? -80 : 24 + bottomPadding,
+              child: child!,
             ),
           ),
         // 底部操作栏
-        AnimatedPositioned(
-          key: const ValueKey('bottom_bar'),
-          duration: const Duration(milliseconds: 200),
-          left: 0,
-          right: 0,
-          bottom: showBottomBar ? 0 : -80,
+        ValueListenableBuilder<bool>(
+          valueListenable: showBottomBarListenable,
           child: TopicBottomBar(
             onScrollToTop: onScrollToTop,
             onShare: onShare,
@@ -158,20 +180,32 @@ class TopicDetailOverlay extends StatelessWidget {
             onCancelFilter: onCancelFilter,
             onShowNestedView: onShowNestedView,
           ),
+          builder: (context, showBottomBar, child) => AnimatedPositioned(
+            key: const ValueKey('bottom_bar'),
+            duration: const Duration(milliseconds: 200),
+            left: 0,
+            right: 0,
+            bottom: showBottomBar ? 0 : -80,
+            child: child!,
+          ),
         ),
         // 悬浮回复按钮
         if (isLoggedIn)
-          AnimatedPositioned(
-            key: const ValueKey('fab_reply'),
-            duration: const Duration(milliseconds: 200),
-            right: 16,
-            bottom: showBottomBar
-                ? bottomPadding + (80 - bottomPadding - 56) / 2
-                : 16 + bottomPadding,
+          ValueListenableBuilder<bool>(
+            valueListenable: showBottomBarListenable,
             child: FloatingActionButton(
               heroTag: 'replyTopic',
               onPressed: onReply,
               child: const Icon(Symbols.reply_rounded),
+            ),
+            builder: (context, showBottomBar, child) => AnimatedPositioned(
+              key: const ValueKey('fab_reply'),
+              duration: const Duration(milliseconds: 200),
+              right: 16,
+              bottom: showBottomBar
+                  ? bottomPadding + (80 - bottomPadding - 56) / 2
+                  : 16 + bottomPadding,
+              child: child!,
             ),
           ),
       ],

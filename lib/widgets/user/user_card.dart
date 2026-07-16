@@ -8,7 +8,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../l10n/s.dart';
 import '../../models/user.dart';
 import '../../providers/discourse_providers.dart';
-import '../../providers/preferences_provider.dart';
 import '../../pages/user_profile_page.dart';
 import '../../services/app_error_handler.dart';
 import '../../services/discourse_cache_manager.dart';
@@ -17,14 +16,13 @@ import '../../services/toast_service.dart';
 import '../../utils/dialog_utils.dart';
 import '../../utils/number_utils.dart';
 import '../../utils/platform_utils.dart';
-import '../../utils/share_utils.dart';
 import '../../utils/time_utils.dart';
 import '../common/flair_badge.dart';
 import 'package:common_ui/common_ui.dart';
 import '../common/skeleton.dart';
 import '../common/smart_avatar.dart';
-import '../content/discourse_html_content/discourse_html_content_widget.dart';
-import '../post/reply_sheet.dart';
+import '../../utils/fluxdo_render_callbacks.dart';
+import 'avatar_action_menu.dart';
 import 'ignore_duration_picker.dart';
 
 /// 卡片与锚点之间的间隙
@@ -44,6 +42,19 @@ const double _kAvatarRadius = 38.0;
 
 /// 头像戳出卡片顶边的高度
 const double _kAvatarOverflow = 24.0;
+
+/// 是否允许展示用户卡片（站点隐藏公开资料时要求已登录）。
+bool canShowUserCardPreview(BuildContext context) {
+  final preloaded = PreloadedDataService();
+  final hideProfilesFromPublic =
+      preloaded.siteSettingsSync?['hide_user_profiles_from_public'] == true;
+  if (!hideProfilesFromPublic) return true;
+
+  final currentUser = ProviderScope.containerOf(context, listen: false)
+      .read(currentUserProvider)
+      .value;
+  return currentUser != null || preloaded.currentUserSync != null;
+}
 
 /// 显示用户卡片。两种形态对齐 Discourse 网页版：
 /// - 桌面端：锚定在头像旁的浮层（优先右侧，其次左/下/上）。
@@ -67,15 +78,7 @@ void showUserCard({
   String? flairBgColor,
   String? flairColor,
 }) {
-  final preloaded = PreloadedDataService();
-  final hideProfilesFromPublic =
-      preloaded.siteSettingsSync?['hide_user_profiles_from_public'] == true;
-  if (hideProfilesFromPublic) {
-    final currentUser = ProviderScope.containerOf(context, listen: false)
-        .read(currentUserProvider)
-        .value;
-    if (currentUser == null && preloaded.currentUserSync == null) return;
-  }
+  if (!canShowUserCardPreview(context)) return;
 
   final anchorContext = context;
   final menuNavigatorKey =
@@ -498,32 +501,13 @@ class _UserCardContentState extends ConsumerState<_UserCardContent> {
   }
 
   void _composeMessage() {
-    final prefs = ref.read(preferencesProvider);
-    final currentUsername = ref.read(currentUserProvider).value?.username;
-
-    String? body;
-    if (widget.topicId != null && widget.postNumber != null) {
-      body = ShareUtils.buildShareUrl(
-        path: '/t/${widget.topicId}/${widget.postNumber}',
-        username: currentUsername,
-        anonymousShare: prefs.anonymousShare,
-      );
-    }
-    // 标题优先用传入的 topicTitle，否则从话题会话状态读取（基于话题的私信预填「回复:标题」）
-    final topicTitle = widget.topicTitle ??
-        (widget.topicId != null
-            ? ref.read(topicSessionProvider(widget.topicId!)).topicTitle
-            : null);
-    final title = (topicTitle != null && topicTitle.isNotEmpty)
-        ? S.current.userCard_referenceTopicTitle(topicTitle)
-        : null;
-
     widget.onClose();
-    showReplySheet(
+    composeMessageToUser(
       context: widget.anchorContext,
-      targetUsername: widget.username,
-      initialContent: body,
-      initialTitle: title,
+      username: widget.username,
+      topicId: widget.topicId,
+      postNumber: widget.postNumber,
+      topicTitle: widget.topicTitle,
     );
   }
 
@@ -742,16 +726,21 @@ class _UserCardContentState extends ConsumerState<_UserCardContent> {
           Row(
             children: [
               Flexible(
-                child: Text(
-                  '@${widget.username}',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: hasBg
-                        ? theme.colorScheme.onSurface.withValues(alpha: 0.9)
-                        : theme.colorScheme.onSurfaceVariant,
-                    shadows: shadows,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  // 点击 @username 复制用户名
+                  onTap: () => copyUsernameToClipboard(widget.username),
+                  child: Text(
+                    '@${widget.username}',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: hasBg
+                          ? theme.colorScheme.onSurface.withValues(alpha: 0.9)
+                          : theme.colorScheme.onSurfaceVariant,
+                      shadows: shadows,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
               ),
               if (user != null) ...[
@@ -788,10 +777,14 @@ class _UserCardContentState extends ConsumerState<_UserCardContent> {
         constraints: const BoxConstraints(maxHeight: 66),
         child: SingleChildScrollView(
           physics: const NeverScrollableScrollPhysics(),
-          child: DiscourseHtmlContent(
-            html: user.bio!,
+          // 用户卡 bio 属只读预览：走新引擎 FluxdoRender，关闭划词选区。
+          child: FluxdoRenderCallbacks.generic(
+            heroTagNamespace: 'user_card_bio_${user.username}',
+          ).render(
+            cookedHtml: user.bio!,
+            baseTextStyle: theme.textTheme.bodyMedium?.copyWith(height: 1.4),
             compact: true,
-            textStyle: theme.textTheme.bodyMedium?.copyWith(height: 1.4),
+            selectionEnabled: false,
           ),
         ),
       ),

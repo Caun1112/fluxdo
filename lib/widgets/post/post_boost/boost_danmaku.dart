@@ -10,6 +10,17 @@ import '../../common/emoji_text.dart';
 import '../../common/smart_avatar.dart';
 import 'boost_content.dart';
 
+typedef BoostDanmakuTapCallback = void Function(Boost boost, Rect? anchorRect);
+
+Rect? _globalRectOf(BuildContext context) {
+  final renderObject = context.findRenderObject();
+  if (renderObject is! RenderBox || !renderObject.hasSize) {
+    return null;
+  }
+  final topLeft = renderObject.localToGlobal(Offset.zero);
+  return topLeft & renderObject.size;
+}
+
 /// Boost 弹幕：多轨道，从右往左飘，视频弹幕样式（透明背景 + 白字描边）。
 ///
 /// 用法：作为 Stack 内的子级叠加到帖子内容上方。
@@ -17,7 +28,7 @@ import 'boost_content.dart';
 class BoostDanmaku extends StatefulWidget {
   final Object? visibilityKey;
   final List<Boost> boosts;
-  final void Function(Boost boost)? onBoostTap;
+  final BoostDanmakuTapCallback? onBoostTap;
 
   /// 滚动速度（px/秒）
   final double pixelsPerSecond;
@@ -65,7 +76,12 @@ class _BoostDanmakuState extends State<BoostDanmaku>
   late List<double> _trackLastRightEdge;
   double _viewportWidth = 0;
   int _trackCount = 1;
-  bool _visible = true;
+
+  /// 初值 false:等 VisibilityDetector 首报可见才启动 Ticker。
+  /// 此前 initState 即 start、dispose 才停,_visible 只让回调早退 ——
+  /// Ticker 常驻 = 只要弹幕帖挂载(含 cacheExtent 预取区)整个 app 就
+  /// 永不空闲;且全部放完后(发完即止)每帧 setState 空转永不停。
+  bool _visible = false;
 
   final math.Random _rng = math.Random();
 
@@ -77,7 +93,7 @@ class _BoostDanmakuState extends State<BoostDanmaku>
     _groups = groupBoostsByContent(widget.boosts);
     _trackCount = widget.maxTrackCount.clamp(1, widget.maxTrackCount);
     _trackLastRightEdge = List.filled(_trackCount, -double.infinity);
-    _ticker = Ticker(_onTick)..start();
+    _ticker = Ticker(_onTick);
   }
 
   @override
@@ -90,6 +106,19 @@ class _BoostDanmakuState extends State<BoostDanmaku>
       if (_groups.length < oldGroupCount) {
         _nextGroupIndex = _groups.length;
       }
+      _ensureTicker(); // 新 boost 到达:停表状态下重新起飞
+    }
+  }
+
+  /// Ticker 生命周期唯一裁决点:可见 且 还有活(飞行中/未发完)才跑。
+  void _ensureTicker() {
+    final hasWork = _flying.isNotEmpty || _nextGroupIndex < _groups.length;
+    final shouldRun = _visible && _groups.isNotEmpty && hasWork;
+    if (shouldRun && !_ticker.isActive) {
+      _lastElapsed = Duration.zero;
+      _ticker.start();
+    } else if (!shouldRun && _ticker.isActive) {
+      _ticker.stop();
     }
   }
 
@@ -139,6 +168,12 @@ class _BoostDanmakuState extends State<BoostDanmaku>
         }
       }
     });
+
+    // 全部放完且飞尽:停表。此前这里每帧 setState 空转到 dispose;
+    // 重新可见(重置一轮)或新 boost 到达时由 _ensureTicker 再启。
+    if (_flying.isEmpty && _nextGroupIndex >= _groups.length) {
+      _ticker.stop();
+    }
   }
 
   void _tryLaunchNext() {
@@ -188,6 +223,7 @@ class _BoostDanmakuState extends State<BoostDanmaku>
             _nextGroupIndex = 0;
             _secondsUntilNextLaunch = 0;
           }
+          _ensureTicker();
         }
       },
       child: LayoutBuilder(
@@ -228,8 +264,10 @@ class _BoostDanmakuState extends State<BoostDanmaku>
                             trackHeight: widget.trackHeight,
                             onTap: widget.onBoostTap == null
                                 ? null
-                                : () =>
-                                      widget.onBoostTap!(item.group.boosts.first),
+                                : (itemContext) => widget.onBoostTap!(
+                                    item.group.boosts.first,
+                                    _globalRectOf(itemContext),
+                                  ),
                             onSize: (size) {
                               if ((size.width - item.width).abs() > 0.5) {
                                 item.width = size.width;
@@ -268,7 +306,7 @@ class _FlyingDanmaku {
 class _DanmakuItem extends StatefulWidget {
   final _FlyingDanmaku item;
   final double trackHeight;
-  final VoidCallback? onTap;
+  final ValueChanged<BuildContext>? onTap;
   final ValueChanged<Size> onSize;
 
   const _DanmakuItem({
@@ -291,6 +329,11 @@ class _DanmakuItemState extends State<_DanmakuItem> {
     final box = ctx.findRenderObject() as RenderBox?;
     if (box == null || !box.hasSize) return;
     widget.onSize(box.size);
+  }
+
+  void _handleTap() {
+    final itemContext = _key.currentContext ?? context;
+    widget.onTap?.call(itemContext);
   }
 
   @override
@@ -345,8 +388,8 @@ class _DanmakuItemState extends State<_DanmakuItem> {
         child: KeyedSubtree(
           key: _key,
           child: GestureDetector(
-            onTap: widget.onTap,
-            onLongPress: widget.onTap,
+            onTap: widget.onTap == null ? null : _handleTap,
+            onLongPress: widget.onTap == null ? null : _handleTap,
             behavior: HitTestBehavior.opaque,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),

@@ -1,6 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- 通知权限 (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- 语音消息录制 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <!-- APK 安装权限 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <!-- 查询所有已安装应用（内置浏览器解析应用链接需要获取目标应用图标和名称） -->
@@ -92,6 +94,10 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="fluxdo" />
+                <!-- 浏览器授权登录回调:discourse://auth_redirect 为
+                     Discourse 站点 allowed_user_api_auth_redirects 默认白名单,
+                     无需站方加白(DiscourseHub 同款流程) -->
+                <data android:scheme="discourse" />
             </intent-filter>
         </activity>
         <!-- 经典图标（默认启动入口） -->
@@ -121,6 +127,15 @@
         <!-- 禁用 Firebase 自动采集，由用户手动开启 -->
         <meta-data android:name="firebase_crashlytics_collection_enabled" android:value="false" />
         <meta-data android:name="firebase_analytics_collection_enabled" android:value="false" />
+        <!-- HCPP (Hybrid Composition++):平台视图(帖内 iframe WebView 等)
+             在屏期间,经典 HC 会把整个 Flutter UI 的合成从专用 raster 线程
+             搬到平台主线程(官方文档明言 "Flutter performance suffers /
+             FPS will be lower"),这是"iframe 显示时整页滚动都卡"的根因。
+             HCPP 用 SurfaceControl 原生事务同步消除该降级;仅 API 34+ 且
+             Vulkan 设备生效,不满足时引擎自动回退经典 HC,无兼容风险。 -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableHcpp"
+            android:value="true" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

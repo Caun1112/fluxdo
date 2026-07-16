@@ -11,6 +11,7 @@ import '../widgets/common/error_view.dart';
 import '../widgets/common/loading_spinner.dart';
 import '../widgets/common/paged_list_footer.dart';
 import '../widgets/search/search_filter_panel.dart';
+import '../widgets/search/search_list_skeleton.dart';
 import '../widgets/search/search_post_card.dart';
 import '../widgets/search/search_preview_dialog.dart';
 import '../providers/preferences_provider.dart';
@@ -22,13 +23,24 @@ import '../l10n/s.dart';
 import 'user_profile_page.dart';
 import '../utils/dialog_utils.dart';
 import '../utils/load_more_coordinator.dart';
+import '../utils/blocked_user_filter.dart';
+import '../widgets/common/search_capsule.dart';
 
 /// 搜索页面
 class SearchPage extends ConsumerStatefulWidget {
   final String? initialQuery;
   final SearchFilter? initialFilter;
 
-  const SearchPage({super.key, this.initialQuery, this.initialFilter});
+  /// 首页搜索胶囊入口：搜索框包同 tag Hero 做跨页 morph（一镜到底），
+  /// 键盘等 Hero 飞行结束再弹（飞行中弹出会顶起布局撕裂动画）
+  final bool heroCapsule;
+
+  const SearchPage({
+    super.key,
+    this.initialQuery,
+    this.initialFilter,
+    this.heroCapsule = false,
+  });
 
   @override
   ConsumerState<SearchPage> createState() => _SearchPageState();
@@ -91,11 +103,32 @@ class _SearchPageState extends ConsumerState<SearchPage> {
       });
     } else {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _focusNode.requestFocus();
+        _requestFocusAfterTransition();
         _loadRecentSearches();
       });
     }
     _scrollController.addListener(_onScroll);
+  }
+
+  /// Hero 入场时等转场（含 Hero 飞行）结束再聚焦弹键盘；普通入场立即聚焦
+  void _requestFocusAfterTransition() {
+    final route = ModalRoute.of(context);
+    if (!widget.heroCapsule ||
+        route == null ||
+        route.animation == null ||
+        route.animation!.isCompleted) {
+      _focusNode.requestFocus();
+      return;
+    }
+    final animation = route.animation!;
+    void listener(AnimationStatus status) {
+      if (status == AnimationStatus.completed) {
+        animation.removeStatusListener(listener);
+        if (mounted) _focusNode.requestFocus();
+      }
+    }
+
+    animation.addStatusListener(listener);
   }
 
   @override
@@ -551,36 +584,95 @@ class _SearchPageState extends ConsumerState<SearchPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
+    final searchField = TextField(
+      controller: _searchController,
+      focusNode: _focusNode,
+      onSubmitted: _onSearch,
+      textInputAction: TextInputAction.search,
+      textAlignVertical: TextAlignVertical.center,
+      // 胶囊模式对齐首页胶囊 hint 的 14px（SearchCapsule 同参）
+      style: widget.heroCapsule
+          ? theme.textTheme.bodyMedium
+          : theme.textTheme.bodyLarge,
+      decoration: InputDecoration(
+        // 胶囊模式 hint 自绘（下方 Stack 覆盖层）：InputDecorator 的
+        // hint 垂直对齐在定高容器里不可控（isDense 偏上 / isCollapsed
+        // 偏下，均已翻车），不再依赖
+        hintText: widget.heroCapsule ? null : context.l10n.search_hintText,
+        border: InputBorder.none,
+        isDense: true,
+        contentPadding: EdgeInsets.symmetric(
+          horizontal: 8,
+          vertical: widget.heroCapsule ? 8 : 12,
+        ),
+        suffixIcon: _searchController.text.isNotEmpty
+            ? IconButton(
+                icon: const Icon(Symbols.close_rounded, size: 20),
+                onPressed: _clearSearch,
+              )
+            : null,
+      ),
+      onChanged: (value) {
+        setState(() {});
+      },
+    );
+
+    // Hero 入场：搜索框套胶囊容器（与首页胶囊同视觉），跨页 morph 的
+    // 落点;flight 用静态胶囊（TextField 不参与飞行，避免光标闪烁）。
+    // 40px 定高胶囊须钳制系统字体缩放（HyperOS 大字体档会撑破胶囊）
+    final Widget titleField = widget.heroCapsule
+        ? Hero(
+            tag: kSearchCapsuleHeroTag,
+            flightShuttleBuilder: searchCapsuleFlightShuttle,
+            child: MediaQuery.withClampedTextScaling(
+              maxScaleFactor: 1.2,
+              child: Container(
+                height: 40,
+                margin: const EdgeInsets.only(right: 4),
+                padding: const EdgeInsets.only(left: 8),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceContainerHighest.withValues(
+                    alpha: 0.5,
+                  ),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                // Hero child 需要 Material 语境（飞行时脱离原位）。
+                // hint 自绘覆盖层：普通 Text + Stack 居中对齐（与首页
+                // 胶囊 hint 同布局方式），彻底绕开 InputDecorator 的
+                // hint 垂直对齐黑盒
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: Stack(
+                    alignment: Alignment.centerLeft,
+                    children: [
+                      if (_searchController.text.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(left: 8),
+                          child: IgnorePointer(
+                            child: Text(
+                              context.l10n.search_hintText,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ),
+                        ),
+                      searchField,
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          )
+        : searchField;
+
     return Scaffold(
       resizeToAvoidBottomInset: false,
       appBar: AppBar(
         titleSpacing: 0,
-        title: TextField(
-          controller: _searchController,
-          focusNode: _focusNode,
-          onSubmitted: _onSearch,
-          textInputAction: TextInputAction.search,
-          textAlignVertical: TextAlignVertical.center,
-          style: Theme.of(context).textTheme.bodyLarge,
-          decoration: InputDecoration(
-            hintText: context.l10n.search_hintText,
-            border: InputBorder.none,
-            isDense: true,
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 8,
-              vertical: 12,
-            ),
-            suffixIcon: _searchController.text.isNotEmpty
-                ? IconButton(
-                    icon: const Icon(Symbols.close_rounded, size: 20),
-                    onPressed: _clearSearch,
-                  )
-                : null,
-          ),
-          onChanged: (value) {
-            setState(() {});
-          },
-        ),
+        title: titleField,
         actions: [
           IconButton(
             icon: const Icon(Symbols.search_rounded),
@@ -694,7 +786,11 @@ class _SearchPageState extends ConsumerState<SearchPage> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Symbols.search_rounded, size: 64, color: theme.colorScheme.outline),
+          Icon(
+            Symbols.search_rounded,
+            size: 64,
+            color: theme.colorScheme.outline,
+          ),
           const SizedBox(height: 16),
           Text(
             context.l10n.search_emptyHint,
@@ -745,7 +841,11 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            Icon(Symbols.north_west_rounded, size: 16, color: theme.colorScheme.outline),
+            Icon(
+              Symbols.north_west_rounded,
+              size: 16,
+              color: theme.colorScheme.outline,
+            ),
           ],
         ),
       ),
@@ -753,7 +853,27 @@ class _SearchPageState extends ConsumerState<SearchPage> {
   }
 
   Widget _buildSearchResults(ThemeData theme) {
-    if (_hasError && _allPosts.isEmpty) {
+    final blockedUsernames = ref.watch(
+      preferencesProvider.select((p) => p.normalizedBlockedUsernames),
+    );
+    final posts = _allPosts
+        .where(
+          (post) => !BlockedUserFilter.isBlockedUsername(
+            post.username,
+            blockedUsernames,
+          ),
+        )
+        .toList(growable: false);
+    final users = _allUsers
+        .where(
+          (user) => !BlockedUserFilter.isBlockedUsername(
+            user.username,
+            blockedUsernames,
+          ),
+        )
+        .toList(growable: false);
+
+    if (_hasError && posts.isEmpty) {
       return ErrorView(
         error: _searchError ?? Exception(context.l10n.search_error),
         stackTrace: _searchErrorStack,
@@ -761,9 +881,11 @@ class _SearchPageState extends ConsumerState<SearchPage> {
       );
     }
 
-    if (_allPosts.isEmpty && _allUsers.isEmpty && !_isLoadingMore) {
-      if (_currentPage == 1) {
-        return const Center(child: LoadingSpinner());
+    if (posts.isEmpty && users.isEmpty && !_isLoadingMore) {
+      // 只有原始结果也为空才可能是首页请求仍在途；
+      // 原始结果非空但过滤后为空 = 全部被本地屏蔽，必须显示空态而非转圈
+      if (_currentPage == 1 && _allPosts.isEmpty && _allUsers.isEmpty) {
+        return const SearchListSkeleton();
       }
       return _buildNoResults();
     }
@@ -771,7 +893,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
     return Column(
       children: [
         // 排序选项
-        if (_allPosts.isNotEmpty || _allUsers.isNotEmpty)
+        if (posts.isNotEmpty || users.isNotEmpty)
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Row(
@@ -856,7 +978,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                 ],
                 Text(
                   context.l10n.search_resultCount(
-                    _allPosts.length,
+                    posts.length,
                     _hasMorePosts ? '+' : '',
                   ),
                   style: theme.textTheme.bodySmall?.copyWith(
@@ -871,13 +993,11 @@ class _SearchPageState extends ConsumerState<SearchPage> {
             controller: _scrollController,
             padding: const EdgeInsets.all(16),
             itemCount:
-                _allPosts.length +
-                (_allUsers.isNotEmpty ? _allUsers.length + 1 : 0) +
-                1,
+                posts.length + (users.isNotEmpty ? users.length + 1 : 0) + 1,
             itemBuilder: (context, index) {
               // 帖子结果（标准 + AI 混合）
-              if (index < _allPosts.length) {
-                final searchPost = _allPosts[index];
+              if (index < posts.length) {
+                final searchPost = posts[index];
                 final enableLongPress = ref
                     .watch(preferencesProvider)
                     .longPressPreview;
@@ -921,30 +1041,30 @@ class _SearchPageState extends ConsumerState<SearchPage> {
               }
 
               // 用户标题
-              final userStartIndex = _allPosts.length;
-              if (_allUsers.isNotEmpty && index == userStartIndex) {
+              final userStartIndex = posts.length;
+              if (users.isNotEmpty && index == userStartIndex) {
                 return Padding(
                   padding: const EdgeInsets.only(top: 16, bottom: 8),
                   child: _buildSectionHeader(
                     context.l10n.search_users,
-                    _allUsers.length,
+                    users.length,
                     _hasMoreUsers,
                   ),
                 );
               }
 
               // 用户结果
-              if (_allUsers.isNotEmpty && index > userStartIndex) {
+              if (users.isNotEmpty && index > userStartIndex) {
                 final userIndex = index - userStartIndex - 1;
-                if (userIndex < _allUsers.length) {
+                if (userIndex < users.length) {
                   return _SearchUserCard(
-                    user: _allUsers[userIndex],
+                    user: users[userIndex],
                     onTap: () {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
                           builder: (_) => UserProfilePage(
-                            username: _allUsers[userIndex].username,
+                            username: users[userIndex].username,
                           ),
                         ),
                       );
@@ -955,8 +1075,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
 
               return PagedListFooter(
                 hasMore: _hasMorePosts,
-                isLoadingMore:
-                    _loadMoreCoordinator.isRunning && _isLoadingMore,
+                isLoadingMore: _loadMoreCoordinator.isRunning && _isLoadingMore,
                 isLoadMoreFailed: _isLoadMoreFailed,
                 onRetry: () {
                   _loadMoreCoordinator.resetCooldown();
@@ -977,7 +1096,11 @@ class _SearchPageState extends ConsumerState<SearchPage> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Symbols.search_off_rounded, size: 64, color: theme.colorScheme.outline),
+          Icon(
+            Symbols.search_off_rounded,
+            size: 64,
+            color: theme.colorScheme.outline,
+          ),
           const SizedBox(height: 16),
           Text(
             context.l10n.search_noResults,
@@ -1068,7 +1191,10 @@ class _SearchUserCard extends StatelessWidget {
                   ],
                 ),
               ),
-              Icon(Symbols.chevron_right_rounded, color: theme.colorScheme.outline),
+              Icon(
+                Symbols.chevron_right_rounded,
+                color: theme.colorScheme.outline,
+              ),
             ],
           ),
         ),

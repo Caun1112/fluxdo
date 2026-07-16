@@ -12,6 +12,7 @@ import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import android.view.View
@@ -61,8 +62,40 @@ class MainActivity : FlutterActivity() {
     private val ICON_CHANNEL = "com.github.lingyan000.fluxdo/app_icon"
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // Cookie IPC 专用后台线程。CookieManager 的 getCookie / setCookie /
+    // getCookieInfo 可从任意线程调用(Chromium cookie store 在自己的 IO
+    // 线程上工作,调用线程只是发起+等待),setCookie 的 ValueCallback 只要求
+    // 发起线程带 Looper — HandlerThread 两者都满足(React Native
+    // ForwardingCookieHandler 同款设计,flutter_inappwebview 的注释也确认
+    // "done on a background thread as needed")。
+    //
+    // 此前整段跑在平台主线程:cf_clearance 周期轮询 / priming 逐 cookie
+    // 三段式 / sweep 的每一次 getCookie/setCookie 都在挤 vsync 分发,
+    // 撞上滚动帧即 vsyncOverhead 型掉帧。下沉后平台主线程零 cookie 工作。
+    private var cookieThread: HandlerThread? = null
+    private var cookieHandler: Handler? = null
+
+    @Synchronized
+    private fun onCookieThread(block: () -> Unit) {
+        val handler = cookieHandler ?: run {
+            val thread = HandlerThread("fluxdo-cookie").also { it.start() }
+            cookieThread = thread
+            Handler(thread.looper).also { cookieHandler = it }
+        }
+        handler.post(block)
+    }
+
+    override fun onDestroy() {
+        cookieThread?.quitSafely()
+        cookieThread = null
+        cookieHandler = null
+        super.onDestroy()
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // 媒体转码通道(音视频压缩到 4MB:media3 Transformer 硬编)
+        MediaTranscodeChannel.register(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "openInBrowser" -> {
@@ -132,15 +165,17 @@ class MainActivity : FlutterActivity() {
                     val url = call.argument<String>("url")
                     val rawSetCookie = call.argument<String>("rawSetCookie")
                     if (url != null && rawSetCookie != null) {
-                        try {
-                            val cookieManager = WebCookieManager.getInstance()
-                            cookieManager.setCookie(url, rawSetCookie) { success ->
-                                cookieManager.flush()
-                                result.success(success)
+                        onCookieThread {
+                            try {
+                                val cookieManager = WebCookieManager.getInstance()
+                                cookieManager.setCookie(url, rawSetCookie) { success ->
+                                    cookieManager.flush()
+                                    mainHandler.post { result.success(success) }
+                                }
+                            } catch (e: Exception) {
+                                Log.e("RawCookie", "setCookie failed: ${e.message}", e)
+                                mainHandler.post { result.success(false) }
                             }
-                        } catch (e: Exception) {
-                            Log.e("RawCookie", "setCookie failed: ${e.message}", e)
-                            result.success(false)
                         }
                     } else {
                         result.error("INVALID_ARGS", "url and rawSetCookie required", null)
@@ -153,15 +188,15 @@ class MainActivity : FlutterActivity() {
                 //
                 // 注意: CookieManager.setCookie(url, value, ValueCallback) 必须在
                 // 带 Looper 的线程上调用 (否则抛 IllegalStateException), 因此整段
-                // 调度必须 post 到 main thread; 同时用 AtomicInteger 计数代替
-                // CountDownLatch, 避免在 main thread 上 await 阻塞。
+                // 调度 post 到 cookie HandlerThread (带 Looper 且不占平台主线程);
+                // 同时用 AtomicInteger 计数代替 CountDownLatch, 避免 await 阻塞。
                 "nukeAllVariants" -> {
                     val url = call.argument<String>("url")
                     val name = call.argument<String>("name")
                     val domainCandidates = call.argument<List<String?>>("domainCandidates")
                     val pathCandidates = call.argument<List<String>>("pathCandidates")
                     if (url != null && name != null && domainCandidates != null && pathCandidates != null) {
-                        mainHandler.post {
+                        onCookieThread {
                             try {
                                 val mgr = WebCookieManager.getInstance()
                                 // 优先：GET_COOKIE_INFO 拿每条 cookie 的真实 domain/path 精确删，
@@ -205,12 +240,17 @@ class MainActivity : FlutterActivity() {
                                     }
                                 }
                                 if (targets.isEmpty()) {
-                                    result.success(0)
-                                    return@post
+                                    mainHandler.post { result.success(0) }
+                                    return@onCookieThread
                                 }
-                                // 删除写入的属性变体:覆盖 普通 / Secure / Secure;SameSite=None。
+                                // 删除写入的属性变体:覆盖 普通 / Secure / Secure;SameSite=None
+                                // / Secure;SameSite=None;Partitioned。
                                 // 仅带 Path/Domain 无法覆盖 cf_clearance 这种
                                 // SameSite=None;Secure 的 cookie(覆盖判定不匹配 → 删不掉)。
+                                // Partitioned(CHIPS) 副本存在独立分区 jar,删除头必须同带
+                                // Secure+Partitioned 才能命中(Chromium 按 host key +
+                                // partition key 匹配);App 内 WebView 顶级站点即 cookie
+                                // 本域,分区键就是自身,故此删除头恰好落在正确分区。
                                 fun deleteRawVariants(domain: String?, path: String): List<String> {
                                     val base = mutableListOf(
                                         "$name=",
@@ -223,7 +263,8 @@ class MainActivity : FlutterActivity() {
                                     return listOf(
                                         plain,
                                         "$plain; Secure",
-                                        "$plain; Secure; SameSite=None"
+                                        "$plain; Secure; SameSite=None",
+                                        "$plain; Secure; SameSite=None; Partitioned"
                                     )
                                 }
                                 fun countName(): Int {
@@ -257,9 +298,11 @@ class MainActivity : FlutterActivity() {
                                                 // 提前停,别白跑剩余轮次。
                                                 val stuck = round > 1 && after >= prevAfter
                                                 if (after > 0 && round < maxRounds && !stuck) {
-                                                    mainHandler.post { runRound(round + 1, after) }
+                                                    onCookieThread { runRound(round + 1, after) }
                                                 } else {
-                                                    result.success(deletedTotal.get())
+                                                    mainHandler.post {
+                                                        result.success(deletedTotal.get())
+                                                    }
                                                 }
                                             }
                                         }
@@ -268,7 +311,7 @@ class MainActivity : FlutterActivity() {
                                 runRound(1, Int.MAX_VALUE)
                             } catch (e: Exception) {
                                 Log.e("RawCookie", "nukeAllVariants failed: ${e.message}", e)
-                                result.success(0)
+                                mainHandler.post { result.success(0) }
                             }
                         }
                     } else {
@@ -284,36 +327,40 @@ class MainActivity : FlutterActivity() {
                     val domain = call.argument<String>("domain")
                     val path = call.argument<String>("path")
                     if (url != null && name != null && path != null) {
-                        try {
-                            val mgr = WebCookieManager.getInstance()
-                            val base = mutableListOf(
-                                "$name=",
-                                "Max-Age=0",
-                                "Expires=Thu, 01 Jan 1970 00:00:00 GMT",
-                                "Path=$path"
-                            )
-                            if (domain != null) base.add("Domain=$domain")
-                            val plain = base.joinToString("; ")
-                            // 带全属性变体,覆盖 Secure / SameSite=None;Secure 的 cookie。
-                            val raws = listOf(
-                                plain,
-                                "$plain; Secure",
-                                "$plain; Secure; SameSite=None"
-                            )
-                            val remaining = AtomicInteger(raws.size)
-                            val anySuccess = java.util.concurrent.atomic.AtomicBoolean(false)
-                            for (raw in raws) {
-                                mgr.setCookie(url, raw) { success ->
-                                    if (success == true) anySuccess.set(true)
-                                    if (remaining.decrementAndGet() == 0) {
-                                        mgr.flush()
-                                        result.success(anySuccess.get())
+                        onCookieThread {
+                            try {
+                                val mgr = WebCookieManager.getInstance()
+                                val base = mutableListOf(
+                                    "$name=",
+                                    "Max-Age=0",
+                                    "Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+                                    "Path=$path"
+                                )
+                                if (domain != null) base.add("Domain=$domain")
+                                val plain = base.joinToString("; ")
+                                // 带全属性变体,覆盖 Secure / SameSite=None;Secure /
+                                // Partitioned(CHIPS 分区副本需 Secure+Partitioned 才能命中)。
+                                val raws = listOf(
+                                    plain,
+                                    "$plain; Secure",
+                                    "$plain; Secure; SameSite=None",
+                                    "$plain; Secure; SameSite=None; Partitioned"
+                                )
+                                val remaining = AtomicInteger(raws.size)
+                                val anySuccess = java.util.concurrent.atomic.AtomicBoolean(false)
+                                for (raw in raws) {
+                                    mgr.setCookie(url, raw) { success ->
+                                        if (success == true) anySuccess.set(true)
+                                        if (remaining.decrementAndGet() == 0) {
+                                            mgr.flush()
+                                            mainHandler.post { result.success(anySuccess.get()) }
+                                        }
                                     }
                                 }
+                            } catch (e: Exception) {
+                                Log.e("RawCookie", "deleteExactCookie failed: ${e.message}", e)
+                                mainHandler.post { result.success(false) }
                             }
-                        } catch (e: Exception) {
-                            Log.e("RawCookie", "deleteExactCookie failed: ${e.message}", e)
-                            result.success(false)
                         }
                     } else {
                         result.error("INVALID_ARGS", "url, name, path required", null)
@@ -326,6 +373,7 @@ class MainActivity : FlutterActivity() {
                 "getAllCookieInfos" -> {
                     val url = call.argument<String>("url")
                     if (url != null) {
+                        onCookieThread {
                             try {
                                 val mgr = WebCookieManager.getInstance()
                                 fun parseCookieInfo(line: String): Map<String, Any?>? {
@@ -428,10 +476,13 @@ class MainActivity : FlutterActivity() {
                                         )
                                     }
                                 }
-                                result.success(infos)
+                                mainHandler.post { result.success(infos) }
                             } catch (e: Exception) {
                                 Log.e("RawCookie", "getAllCookieInfos failed: ${e.message}", e)
-                            result.success(emptyList<Map<String, Any?>>())
+                                mainHandler.post {
+                                    result.success(emptyList<Map<String, Any?>>())
+                                }
+                            }
                         }
                     } else {
                         result.error("INVALID_ARGS", "url required", null)
@@ -444,19 +495,21 @@ class MainActivity : FlutterActivity() {
                     val url = call.argument<String>("url")
                     val name = call.argument<String>("name")
                     if (url != null && name != null) {
-                        try {
-                            val mgr = WebCookieManager.getInstance()
-                            val cookieString = mgr.getCookie(url) ?: ""
-                            val count = cookieString.split(";").count { entry ->
-                                val trimmed = entry.trim()
-                                val eqIdx = trimmed.indexOf('=')
-                                if (eqIdx <= 0) false
-                                else trimmed.substring(0, eqIdx).trim() == name
+                        onCookieThread {
+                            try {
+                                val mgr = WebCookieManager.getInstance()
+                                val cookieString = mgr.getCookie(url) ?: ""
+                                val count = cookieString.split(";").count { entry ->
+                                    val trimmed = entry.trim()
+                                    val eqIdx = trimmed.indexOf('=')
+                                    if (eqIdx <= 0) false
+                                    else trimmed.substring(0, eqIdx).trim() == name
+                                }
+                                mainHandler.post { result.success(count) }
+                            } catch (e: Exception) {
+                                Log.e("RawCookie", "countCookiesByName failed: ${e.message}", e)
+                                mainHandler.post { result.success(0) }
                             }
-                            result.success(count)
-                        } catch (e: Exception) {
-                            Log.e("RawCookie", "countCookiesByName failed: ${e.message}", e)
-                            result.success(0)
                         }
                     } else {
                         result.error("INVALID_ARGS", "url, name required", null)

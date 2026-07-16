@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 
 import '../../providers/preferences_provider.dart';
+import '../../services/discourse_cook_service.dart';
 import '../../services/emoji_handler.dart';
 import '../../utils/platform_utils.dart';
 import '../mention/mention_autocomplete.dart';
@@ -62,6 +63,20 @@ class MarkdownEditor extends ConsumerStatefulWidget {
   /// 外部预览状态（可选，配合 [onTogglePreview] 使用）
   final bool? isPreview;
 
+  /// 用户点"富文本模式"按钮(源码 → 富文本切换;宿主重挂
+  /// RichComposerEditor,内容经 controller 无缝衔接 + 导入门禁)。
+  /// null = 不显示切换按钮(富文本开关未开/已降级不可逆场景)。
+  final VoidCallback? onSwitchToRich;
+
+  /// 滚动头部(标题/标签等元数据区):放进编辑区滚动容器顶部,与正文
+  /// 一起滚 —— 手机上写正文时头部自然滚出屏,编辑区满格(零跳变:
+  /// 头部高度恒定,离场回场全由滚动驱动)。null 时无头部。
+  final Widget? header;
+
+  /// 底部属性条(编辑区与工具栏之间,如 ComposerMetaBar):
+  /// 分类/标签/字数等元数据常驻可见可改,不随滚动离场。null 时无。
+  final Widget? metaBar;
+
   const MarkdownEditor({
     super.key,
     required this.controller,
@@ -75,6 +90,9 @@ class MarkdownEditor extends ConsumerStatefulWidget {
     this.showPreviewButton = true,
     this.onTogglePreview,
     this.isPreview,
+    this.onSwitchToRich,
+    this.header,
+    this.metaBar,
   });
 
   @override
@@ -123,6 +141,9 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
       _ownsFocusNode = true;
     }
     EmojiHandler().init();
+    // 预热 1:1 cook 引擎(eval bundle + 注入站点数据),
+    // 让首次切预览时 JS cook 已就绪
+    DiscourseCookService().warmUp();
     _previousText = widget.controller.text;
     widget.controller.addListener(_handleTextChange);
   }
@@ -142,6 +163,13 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
   void _handleTextChange() {
     final currentText = widget.controller.text;
     final selection = widget.controller.selection;
+
+    // 外滚结构下 TextField 不自滚,EditableText 的 showCaretOnScreen
+    // 管不到外层 CustomScrollView —— 打字/换行/删除后手动跟随光标
+    // (视口内 no-op,越界才 animateTo)。
+    if (_focusNode.hasFocus) {
+      _scrollToCursor();
+    }
 
     // 只在文本增加时处理
     if (currentText.length <= _previousText.length) {
@@ -345,8 +373,28 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
     }
   }
 
-  /// 滚动到光标位置
-  void _scrollToCursor() {
+  /// 编辑列下方空白区点击:等价"点在正文末尾"(聚焦 + 光标置末)。
+  /// 外滚结构下 TextField 只占内容高,旧 expands 的整区可点由此兜底;
+  /// readOnly(表情面板开)时与 TextField 的 Listener 同款切回键盘。
+  void _onBlankAreaTap() {
+    if (_readOnly) {
+      _intendedPanel = EditorPanelType.none;
+      _updateReadOnly(false);
+      _panelController.updatePanelType(ChatBottomPanelType.keyboard);
+    }
+    _focusNode.requestFocus();
+    widget.controller.selection = TextSelection.collapsed(
+      offset: widget.controller.text.length,
+    );
+    _scrollToCursor();
+  }
+
+  /// 滚动到光标位置(视口内 no-op,越界才滚)。
+  /// [animated] 默认 false:文本变化的同一帧里 EditableText 自身的
+  /// showCaretOnScreen 会开启滚动活动,animateTo 的动画会被它同帧
+  /// 取代而失效 —— 打字跟随必须 jumpTo(每次只差一行高,无感);
+  /// 表情面板展开路径(延迟 200ms 后调用,无同帧竞争)传 true 平滑滚。
+  void _scrollToCursor({bool animated = false}) {
     if (!mounted) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scrollController.hasClients) return;
@@ -370,27 +418,41 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
 
       if (editable == null) return;
 
-      final caretRect = editable!.getLocalRectForCaret(
+      final caretLocal = editable!.getLocalRectForCaret(
         TextPosition(offset: selection.baseOffset),
       );
 
       final position = _scrollController.position;
-      // caretRect 是 viewport 局部坐标（0=视口顶部，viewportDimension=视口底部）
+      // 外滚结构:caret 是 RenderEditable 局部坐标,TextField 上方还有
+      // header sliver —— 经全局坐标换算到滚动 viewport 局部
+      // (0=视口顶部,viewportDimension=视口底部)再判越界。
+      final viewportBox =
+          position.context.storageContext.findRenderObject();
+      if (viewportBox is! RenderBox || !viewportBox.attached) return;
+      final topLeftGlobal = editable!.localToGlobal(caretLocal.topLeft);
+      final caretTop = viewportBox.globalToLocal(topLeftGlobal).dy;
+      final caretBottom = caretTop + caretLocal.height;
+
       double? target;
-      if (caretRect.bottom > position.viewportDimension) {
+      if (caretBottom > position.viewportDimension) {
         // 光标在视口下方，需要向下滚
-        target = position.pixels + caretRect.bottom - position.viewportDimension + 8.0;
-      } else if (caretRect.top < 0) {
+        target = position.pixels + caretBottom - position.viewportDimension + 8.0;
+      } else if (caretTop < 0) {
         // 光标在视口上方，需要向上滚
-        target = position.pixels + caretRect.top - 8.0;
+        target = position.pixels + caretTop - 8.0;
       }
 
       if (target != null) {
-        _scrollController.animateTo(
-          target.clamp(0.0, position.maxScrollExtent),
-          duration: const Duration(milliseconds: 150),
-          curve: Curves.easeOut,
-        );
+        final clamped = target.clamp(0.0, position.maxScrollExtent);
+        if (animated) {
+          _scrollController.animateTo(
+            clamped,
+            duration: const Duration(milliseconds: 150),
+            curve: Curves.easeOut,
+          );
+        } else {
+          _scrollController.jumpTo(clamped);
+        }
       }
     });
   }
@@ -398,6 +460,16 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
   /// 请求焦点
   void requestFocus() {
     _focusNode.requestFocus();
+  }
+
+  /// 编辑区滚回顶部(header 含标题输入,校验失败等场景需拉回可见)
+  void scrollToTop() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      0,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   /// 当前是否显示表情面板
@@ -527,12 +599,15 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
     final textField = TextField(
       controller: widget.controller,
       focusNode: _focusNode,
-      scrollController: _scrollController,
       readOnly: _readOnly,
       showCursor: true,
+      // 外滚结构:TextField 自身不滚(maxLines:null 全内容展开),
+      // 滚动由外层 CustomScrollView 承担 —— header(标题/元数据)
+      // 才能与正文同滚。光标跟随由 _scrollToCursor 补(外滚后
+      // EditableText 的 showCaretOnScreen 只作用于内部零高滚动区)。
+      // expands 语义改由外层 Expanded 空白点击区提供(见 build)。
       maxLines: null,
       minLines: widget.expands ? null : widget.minLines,
-      expands: widget.expands,
       textAlignVertical: TextAlignVertical.top,
       keyboardType: TextInputType.multiline,
       contextMenuBuilder: _buildContextMenu,
@@ -657,19 +732,80 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
         Expanded(
           child: _isPreview && widget.onTogglePreview == null
               ? SingleChildScrollView(
-                  padding: const EdgeInsets.all(16),
-                  child: widget.controller.text.isEmpty
-                      ? Text(
-                          S.current.editor_noContent,
-                          style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
-                        )
-                      : MarkdownBody(data: widget.controller.text),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (widget.header != null) widget.header!,
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: widget.controller.text.isEmpty
+                            ? Text(
+                                S.current.editor_noContent,
+                                style: TextStyle(
+                                    color: theme.colorScheme.onSurfaceVariant),
+                              )
+                            : MarkdownBody(
+                                data: widget.controller.text,
+                                // 预览里可缩放图(上传图)的 100/75/50 胶囊:
+                                // 官方同款正则改 raw 的 `, N%` 后缀,预览随
+                                // controller 变更自动重 cook。
+                                onImageScaleChanged: (image, scale) {
+                                  final next = applyImageScaleToRaw(
+                                      widget.controller.text, image, scale);
+                                  if (next != null) {
+                                    widget.controller.text = next;
+                                    setState(() {});
+                                  }
+                                },
+                              ),
+                      ),
+                    ],
+                  ),
                 )
-              : Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: _buildTextEditor(),
+              // 外滚结构:header(标题/元数据)与 TextField 同在一个
+              // CustomScrollView,写正文时头部随内容滚出屏。
+              // SliverFillRemaining(hasScrollBody:false):内容短时编辑列
+              // 仍撑满剩余视口,下方空白由 filler 接管点击(聚焦+光标置
+              // 末,对齐旧 expands 整区可点行为)。TextField 支持内在
+              // 高度计算,SliverFillRemaining 的 intrinsic 测量安全。
+              : CustomScrollView(
+                  controller: _scrollController,
+                  slivers: [
+                    if (widget.header != null)
+                      SliverToBoxAdapter(child: widget.header),
+                    SliverFillRemaining(
+                      hasScrollBody: false,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Padding(
+                            padding:
+                                const EdgeInsets.symmetric(horizontal: 16),
+                            child: _buildTextEditor(),
+                          ),
+                          // 空白填充区:点击等价"点在正文末尾"。包
+                          // TextFieldTapRegion 防 TextField 的 onTapOutside
+                          // 先收键盘再由我们重新聚焦(闪一下)。
+                          Expanded(
+                            child: TextFieldTapRegion(
+                              child: MouseRegion(
+                                cursor: SystemMouseCursors.text,
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: _onBlankAreaTap,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
         ),
+
+        // 底部属性条(分类/标签/字数常驻,不随滚动离场)
+        if (widget.metaBar != null) widget.metaBar!,
 
         // 工具栏（纯按钮行，TextFieldTapRegion 防止点击时 TextField 失焦）
         TextFieldTapRegion(
@@ -680,6 +816,7 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
           showPreviewButton: widget.showPreviewButton,
           isPreview: _isPreview,
           onTogglePreview: _togglePreview,
+          onSwitchToRich: widget.onSwitchToRich,
           onApplyPangu: _applyPanguSpacing,
           showPanguButton: !ref.watch(preferencesProvider).autoPanguSpacing,
           onToggleEmoji: () => _togglePanel(EditorPanelType.emoji),
@@ -742,7 +879,7 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
               // 面板展开后，等 AnimatedSize 动画（200ms）结束再滚动到光标位置
               if (isCustom && wasNone) {
                 Future.delayed(const Duration(milliseconds: 200), () {
-                  _scrollToCursor();
+                  _scrollToCursor(animated: true);
                 });
               }
             }

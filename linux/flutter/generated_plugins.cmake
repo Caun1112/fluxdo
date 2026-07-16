@@ -8,10 +8,13 @@ list(APPEND FLUTTER_PLUGIN_LIST
   flutter_acrylic
   flutter_avif_linux
   flutter_inappwebview_linux
+  flutter_js
   flutter_secure_storage_linux
   flutter_timezone
   gtk
   irondash_engine_context
+  quickjs_engine
+  record_linux
   screen_retriever_linux
   super_native_extensions
   url_launcher_linux

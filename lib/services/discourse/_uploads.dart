@@ -6,6 +6,14 @@ class ResolvedUploadUrl {
 
   const ResolvedUploadUrl({required this.url, this.shortPath});
 
+  /// 负缓存哨兵:lookup-urls 请求**成功**但服务端未返回此短链(上传已
+  /// 删除/失效)。对齐官方 upload-short-url.js 的 MISSING 语义 —— 会话内
+  /// 不再重试。否则失效短链每次 build 都 cache miss 重发请求,编辑预览
+  /// 持续刷新时演变成请求风暴 → 429 速率限制连坐拖垮同帖正常图片的解析。
+  static const missing = ResolvedUploadUrl(url: '');
+
+  bool get isMissing => url.isEmpty;
+
   String mediaUrl() {
     if (url.contains('secure-media-uploads') ||
         url.contains('secure-uploads')) {
@@ -242,18 +250,28 @@ mixin _UploadsMixin on _DiscourseServiceBase {
     return false;
   }
 
-  /// 上传文件（内置速率限制重试，支持图片和附件）
-  Future<UploadResult> uploadFile(String filePath) async {
+  /// 上传文件（内置速率限制重试，支持图片和附件）。
+  /// [filenameOverride]/[contentTypeOverride]:媒体改名上传用(见
+  /// [uploadMediaAsXz]),不影响常规路径。
+  Future<UploadResult> uploadFile(
+    String filePath, {
+    String? filenameOverride,
+    DioMediaType? contentTypeOverride,
+  }) async {
     const maxRetries = 3;
 
     for (int attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        final fileName = filePath.split('/').last;
+        final fileName = filenameOverride ?? filePath.split('/').last;
 
         final formData = FormData.fromMap({
           'upload_type': 'composer',
           'synchronous': true,
-          'file': await MultipartFile.fromFile(filePath, filename: fileName),
+          'file': await MultipartFile.fromFile(
+            filePath,
+            filename: fileName,
+            contentType: contentTypeOverride,
+          ),
         });
 
         final response = await _dio.post(
@@ -347,6 +365,32 @@ mixin _UploadsMixin on _DiscourseServiceBase {
   /// 上传图片（uploadFile 的别名，保持向后兼容）
   Future<UploadResult> uploadImage(String filePath) => uploadFile(filePath);
 
+  /// 媒体上传的站点体积上限(linux.do 4MB;超限服务端 413)。
+  static const int maxMediaUploadBytes = 4 * 1024 * 1024;
+
+  /// 音视频改名上传(与社区「媒体上传」脚本同 hack):站点扩展名白名单
+  /// 不含音视频,把文件名换 `.xz`(application/x-xz)绕过 —— 播放端
+  /// (本 app MediaCompatService 嗅探 / 网页原生 audio·video 标签)不受
+  /// 扩展名影响。4MB 前置检查,超限直接抛(不做压缩,调用方提示)。
+  Future<UploadResult> uploadMediaAsXz(String filePath) async {
+    final size = await File(filePath).length();
+    if (size >= maxMediaUploadBytes) {
+      throw Exception(
+        '媒体文件须小于 4MB,当前 ${UploadResult.formatFileSize(size)};'
+        '请先压缩后再上传',
+      );
+    }
+    final base = filePath.split('/').last;
+    final dot = base.lastIndexOf('.');
+    final stem = dot > 0 ? base.substring(0, dot) : base;
+    final xzName = '$stem.xz';
+    return uploadFile(
+      filePath,
+      filenameOverride: xzName,
+      contentTypeOverride: DioMediaType('application', 'x-xz'),
+    );
+  }
+
   /// 批量解析 short_url（内置速率限制重试，对齐 uploadFile）
   Future<List<Map<String, dynamic>>> lookupUrls(List<String> shortUrls) async {
     final missingUrls = shortUrls
@@ -378,6 +422,12 @@ mixin _UploadsMixin on _DiscourseServiceBase {
               );
             }
           }
+        }
+        // 请求成功但未返回的短链 = 上传不存在(已删除/失效),写负缓存
+        // 会话内不再重试(对齐官方 MISSING);网络失败(catch 分支)不写,
+        // 临时性失败下次仍可重试。
+        for (final url in missingUrls) {
+          _urlCache.putIfAbsent(url, () => ResolvedUploadUrl.missing);
         }
         return result;
       } on DioException catch (e) {
@@ -444,7 +494,8 @@ mixin _UploadsMixin on _DiscourseServiceBase {
     return future;
   }
 
-  /// 解析单个 short_url
+  /// 解析单个 short_url。返回 null = 网络失败(可重试);
+  /// [ResolvedUploadUrl.missing] = 服务端确认不存在(调用方按裂图处理)。
   Future<ResolvedUploadUrl?> resolveShortUpload(String shortUrl) async {
     if (!shortUrl.startsWith('upload://')) {
       return ResolvedUploadUrl(url: shortUrl, shortPath: shortUrl);
@@ -462,14 +513,15 @@ mixin _UploadsMixin on _DiscourseServiceBase {
     if (!shortUrl.startsWith('upload://')) return shortUrl;
 
     final resolved = await resolveShortUpload(shortUrl);
-    return resolved?.mediaUrl();
+    if (resolved == null || resolved.isMissing) return null;
+    return resolved.mediaUrl();
   }
 
   Future<String?> resolveShortUrlForLink(String shortUrl) async {
     if (!shortUrl.startsWith('upload://')) return shortUrl;
 
     final resolved = await resolveShortUpload(shortUrl);
-    if (resolved == null) return null;
+    if (resolved == null || resolved.isMissing) return null;
 
     final secureUploads =
         PreloadedDataService().siteSettingsSync?['secure_uploads'] == true;

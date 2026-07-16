@@ -4,11 +4,14 @@ import 'package:flutter/foundation.dart';
 import '../../services/app_error_handler.dart';
 import '../../services/notion/notion_bookmark_auto_sync.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderSliver, RenderViewport;
+import 'package:flutter/scheduler.dart' show SchedulerBinding, Priority;
 import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:scroll_to_index/scroll_to_index.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../l10n/s.dart';
+import '../../utils/frame_jank_monitor.dart';
 import '../../utils/html_text_mapper.dart';
 import '../../utils/html_to_markdown.dart';
 import '../../utils/code_selection_context.dart';
@@ -19,6 +22,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import '../../models/draft.dart';
 import '../../models/topic.dart';
+import '../../utils/blocked_user_filter.dart';
 import '../../utils/responsive.dart';
 import '../../utils/share_utils.dart';
 import '../../providers/preferences_provider.dart';
@@ -45,8 +49,6 @@ import '../../widgets/topic/topic_notification_button.dart';
 import 'package:common_ui/common_ui.dart';
 import '../../widgets/common/emoji_text.dart';
 import '../../widgets/common/error_view.dart';
-import '../../widgets/content/discourse_html_content/chunked/chunked_html_content.dart';
-import '../../widgets/content/discourse_html_content/discourse_html_content_widget.dart';
 import '../../providers/nested_topic_provider.dart';
 import 'controllers/topic_detail_controller.dart';
 import 'widgets/nested_post_list.dart';
@@ -160,9 +162,20 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
   // UI State
   final GlobalKey _headerKey = GlobalKey();
   final GlobalKey _centerKey = GlobalKey();
+
+  /// 视口 anchor（center 零点在视口内的位置，0 = 顶部）。
+  /// 目标帖下方内容不足一屏时由 _updateBottomAnchorIfNeeded 按真实几何
+  /// 抬高，使 offset 0 = 底边贴齐，底部空白被排除在滚动范围之外
+  double _viewportAnchor = 0.0;
   bool _hasFirstPost = false;
   bool _isCheckTitleVisibilityScheduled = false;
   bool _isRefreshing = false;
+
+  /// 本地屏蔽名单过滤缓存：provider 状态与名单实例都未变时复用同一份
+  /// 过滤结果，保证同一帧内多处读取拿到 identical 的 posts 列表
+  TopicDetail? _blockedFilterInput;
+  Set<String>? _blockedFilterBlocked;
+  TopicDetail? _blockedFilterOutput;
 
   /// 标题是否显示（用 ValueNotifier 隔离 AppBar 更新）
   final ValueNotifier<bool> _showTitleNotifier = ValueNotifier<bool>(false);
@@ -186,6 +199,9 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
   late final AnimationController _expandController;
   late final Animation<Offset> _animation;
   Set<int> _lastReadPostNumbers = {};
+
+  /// 滚动中推迟的 msgbus 帖子更新(滚停后回放,防滚动路径上方高度跳变)
+  final List<PostUpdate> _deferredPostUpdates = [];
   bool? _lastCanShowDetailPane;
   bool _isAutoSwitching = false;
   bool _autoOpenReplyHandled = false; // 是否已处理自动打开回复框
@@ -209,8 +225,18 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
   bool _userMutatedFallback = false;
   ModalRoute<dynamic>? _route;
   bool _isRouteVisible = true;
+
+  /// 进入转场是否已完成。转场期间物化真实帖子列表(缓存命中时首屏多个
+  /// PostItem 的构建 + 中文排版)会把大 build 帧砸在动画中间 —— 换什么
+  /// 转场曲线都掉帧。未完成前一律先渲染骨架(与首次加载视觉一致),
+  /// completed 后下一帧再物化,把成本挪出动画窗口。无转场进入(动画
+  /// 初始即 completed)时保持 true,零影响。
+  bool _routeTransitionDone = true;
   bool _isParentActive = true;
   bool _isScreenTrackRunning = false;
+
+  /// 初始定位期间被抑制的 eyeline 上报楼层（定位完成后回放）
+  int? _suppressedEyelinePostNumber;
 
   bool get _usesEmbeddedMobileWorkspaceChrome {
     return widget.embeddedMode &&
@@ -265,18 +291,22 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
         debugPrint(
           '[TopicDetail] onTimingsSent callback triggered: topicId=$topicId, highestSeen=$highestSeen',
         );
-        // 遍历所有分类 tab，更新所有活跃的 provider 实例
-        final pinnedIds = ref.read(pinnedCategoriesProvider);
-        final categoryIds = [null, ...pinnedIds];
-        for (final categoryId in categoryIds) {
-          ref
-              .read(topicListProvider(categoryId).notifier)
-              .updateSeen(topicId, highestSeen);
-        }
         // 更新会话已读状态，触发 PostItem 消除未读圆点
         ref
             .read(topicSessionProvider(topicId).notifier)
             .markAsRead(postNumbers);
+        // 遍历所有分类 tab 更新列表页 lastReadPostNumber。会重建栈底的
+        // 列表页,推迟到 idle 执行,避免上报回调恰好落在滚动帧内造成掉帧
+        SchedulerBinding.instance.scheduleTask(() {
+          if (!mounted) return;
+          final pinnedIds = ref.read(pinnedCategoriesProvider);
+          final categoryIds = [null, ...pinnedIds];
+          for (final categoryId in categoryIds) {
+            ref
+                .read(topicListProvider(categoryId).notifier)
+                .updateSeen(topicId, highestSeen);
+          }
+        }, Priority.idle);
       },
     );
 
@@ -293,6 +323,12 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     );
 
     _controller.scrollController.addListener(_onScroll);
+    // 滚动停止 → 回放滚动期间推迟的 msgbus 帖子更新
+    // (isScrollingNotifier 在 position attach 后才有,帧后挂)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _attachScrollIdleFlush();
+    });
     _pageController = PageController(initialPage: 0);
 
     // 桌面端：注册 J/K 帖子导航 + AI 面板切换
@@ -303,6 +339,43 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
   }
 
   bool _isAiSheetOpen = false;
+
+  /// 已挂 idle-flush 监听的 ScrollPosition(attach/detach 时换绑)
+  ScrollPosition? _idleFlushPosition;
+
+  void _attachScrollIdleFlush() {
+    final sc = _controller.scrollController;
+    if (!sc.hasClients) {
+      // position 尚未 attach(骨架屏期),下一帧再试
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _attachScrollIdleFlush();
+      });
+      return;
+    }
+    final position = sc.position;
+    if (identical(_idleFlushPosition, position)) return;
+    _idleFlushPosition?.isScrollingNotifier.removeListener(_onScrollIdle);
+    _idleFlushPosition = position;
+    position.isScrollingNotifier.addListener(_onScrollIdle);
+  }
+
+  void _onScrollIdle() {
+    if (!mounted) return;
+    if (_idleFlushPosition?.isScrollingNotifier.value ?? true) return;
+    if (_deferredPostUpdates.isEmpty) return;
+    // 推迟一帧回放:isScrollingNotifier 翻 false 发生在惯性最后一个 tick
+    // 的同一帧,若同帧内直接回放,布局时 pixels 相对上一帧仍在变,
+    // AnchorGuardSliver 的"偏移与基线一致"守卫会判为不可比,回放引发的
+    // 高度位移就漏掉锚定修正。推一帧让更新落在纯空闲帧,位移被全额补偿。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      // 帧间隙内可能又开始滚动:保持冻结,等下一次滚停
+      if (_idleFlushPosition?.isScrollingNotifier.value ?? true) return;
+      if (_deferredPostUpdates.isEmpty) return;
+      final notifier = ref.read(topicDetailProvider(_params).notifier);
+      _flushDeferredPostUpdates(notifier);
+    });
+  }
 
   void _onToggleAiPanel() {
     if (!mounted) return;
@@ -517,6 +590,11 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     _route = route;
     appRouteObserver.subscribe(this, route);
     _isRouteVisible = route.isCurrent;
+    final enterAnim = route.animation;
+    if (enterAnim != null && !enterAnim.isCompleted) {
+      _routeTransitionDone = false;
+      enterAnim.addStatusListener(_onRouteEnterAnimStatus);
+    }
     _schedulePostShortcutRegistration();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -524,8 +602,18 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     });
   }
 
+  void _onRouteEnterAnimStatus(AnimationStatus status) {
+    if (status != AnimationStatus.completed) return;
+    _route?.animation?.removeStatusListener(_onRouteEnterAnimStatus);
+    if (!mounted) return;
+    setState(() => _routeTransitionDone = true);
+  }
+
   @override
   void dispose() {
+    _idleFlushPosition?.isScrollingNotifier.removeListener(_onScrollIdle);
+    _idleFlushPosition = null;
+    _route?.animation?.removeStatusListener(_onRouteEnterAnimStatus);
     if (_route != null) {
       appRouteObserver.unsubscribe(this);
     }
@@ -667,7 +755,7 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     }
   }
 
-  void _maybeSwitchToMasterDetail(bool canShowDetailPane, TopicDetail? detail) {
+  void _maybeSwitchToMasterDetail(bool canShowDetailPane) {
     if (widget.embeddedMode) {
       _lastCanShowDetailPane = canShowDetailPane;
       return;
@@ -690,17 +778,17 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
 
     if (previous == null) {
       if (canShowDetailPane) {
-        _switchToMasterDetail(detail);
+        _switchToMasterDetail();
       }
       return;
     }
     if (previous == canShowDetailPane) return;
     if (!previous && canShowDetailPane) {
-      _switchToMasterDetail(detail);
+      _switchToMasterDetail();
     }
   }
 
-  void _switchToMasterDetail(TopicDetail? detail) {
+  void _switchToMasterDetail() {
     _isAutoSwitching = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -715,7 +803,11 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
           .read(selectedTopicProvider.notifier)
           .select(
             topicId: widget.topicId,
-            initialTitle: detail?.title ?? widget.initialTitle,
+            // 切换瞬间现读即可,不需要 build 期持有 detail(顶层已不再
+            // watch 完整 detail,见 build 内注释)
+            initialTitle:
+                ref.read(topicDetailProvider(_params)).value?.title ??
+                widget.initialTitle,
             scrollToPostNumber: currentPostNumber,
             instanceId: _instanceId,
           );
@@ -1421,6 +1513,85 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     );
   }
 
+  /// 供缓存的 [TopicDetailOverlay] 实例回调:现取最新 detail,
+  /// 避免闭包捕获构建时的旧 detail(实例缓存后闭包生命周期变长)。
+  void _showTimelineSheetForCurrent() {
+    final detail = ref.read(topicDetailProvider(_params)).value;
+    if (detail != null) _showTimelineSheet(detail);
+  }
+
+  void _showReadBoostSheetForCurrent() {
+    final detail = ref.read(topicDetailProvider(_params)).value;
+    if (detail != null) _showReadBoostSheet(detail);
+  }
+
+  void _handleProgressGestureForCurrent(ProgressGestureAction action) {
+    final detail = ref.read(topicDetailProvider(_params)).value;
+    if (detail == null) return;
+    final notifier = ref.read(topicDetailProvider(_params).notifier);
+    _handleProgressGesture(action, detail, notifier);
+  }
+
+  /// [TopicDetailOverlay] 的实例缓存(输入签名比对):见调用处注释。
+  ({Object signature, Widget widget})? _overlayCache;
+
+  Widget _buildOverlayCached(
+    TopicDetail detail,
+    TopicDetailNotifier notifier,
+    bool isLoggedIn,
+    ReadBoostState readBoostState,
+  ) {
+    // Overlay 及其子树实际消费的全部低频输入;detail 对象本身不入签名
+    // (它每次更新都是新实例),只取 Overlay 用到的字段。
+    final signature = (
+      isLoggedIn: isLoggedIn,
+      totalCount: detail.postStream.stream.length,
+      hasSummary: detail.hasSummary,
+      isPrivateMessage: detail.isPrivateMessage,
+      isSummaryMode: notifier.isSummaryMode,
+      isAuthorOnlyMode: notifier.isAuthorOnlyMode,
+      isTopLevelMode: notifier.isTopLevelMode,
+      isNestedMode: _isNestedView,
+      isLoading: _isSwitchingMode,
+      isReadBoostActive: readBoostState.isRunning,
+      readBoostProgress: readBoostState.progress,
+    );
+    final cached = _overlayCache;
+    if (cached != null && cached.signature == signature) {
+      return cached.widget;
+    }
+    final overlay = TopicDetailOverlay(
+      showBottomBarListenable: _controller.showBottomBarNotifier,
+      isLoggedIn: isLoggedIn,
+      streamIndexListenable: _controller.streamIndexNotifier,
+      totalCount: detail.postStream.stream.length,
+      detail: detail,
+      onScrollToTop: _scrollToTop,
+      onShare: _shareTopic,
+      onShareAsImage: _shareAsImage,
+      onExport: _showExportSheet,
+      onOpenInBrowser: _openInBrowser,
+      onReply: () => _handleReply(null),
+      isReadBoostActive: readBoostState.isRunning,
+      readBoostProgress: readBoostState.progress,
+      onShowReadBoost: _showReadBoostSheetForCurrent,
+      onProgressTap: _showTimelineSheetForCurrent,
+      onProgressGesture: _handleProgressGestureForCurrent,
+      isSummaryMode: notifier.isSummaryMode,
+      isAuthorOnlyMode: notifier.isAuthorOnlyMode,
+      isTopLevelMode: notifier.isTopLevelMode,
+      isNestedMode: _isNestedView,
+      isLoading: _isSwitchingMode,
+      onShowTopReplies: _handleShowTopReplies,
+      onShowAuthorOnly: _handleShowAuthorOnly,
+      onShowTopLevelReplies: _handleShowTopLevelReplies,
+      onCancelFilter: _handleCancelFilter,
+      onShowNestedView: _toggleNestedView,
+    );
+    _overlayCache = (signature: signature, widget: overlay);
+    return overlay;
+  }
+
   /// 路由进度悬浮条手势触发的 [ProgressGestureAction] 到对应业务方法
   void _handleProgressGesture(
     ProgressGestureAction action,
@@ -1512,11 +1683,32 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     });
 
     final params = _params;
-    final detailAsync = ref.watch(topicDetailProvider(params));
-    final detail = detailAsync.value;
+    // 整页 rebuild 解耦:顶层不再 watch 完整 detail —— 生产 STALL-PROF
+    // 定案,每次翻页落地/msgbus 更新都从 Scaffold 到浮层全链重建
+    // (~60ms UI 阻塞,STALL 主力)。完整 detail 的 watch 下沉到
+    // AppBar/body/AI 页各自的 Consumer 边界,落地帧只重建这三块,
+    // 页面骨架(LazyLoadScope/PopScope/PageView/Scaffold)整体短路。
+    // 顶层只保留"是否已有数据"布尔信号(null↔非null 边界才重建)。
+    final hasDetail = ref.watch(
+      topicDetailProvider(params).select((a) => a.value != null),
+    );
     final notifier = ref.read(topicDetailProvider(params).notifier);
 
-    _maybeSwitchToMasterDetail(canShowDetailPane, detail);
+    // 会话已读集合变化(timings 上报成功后 markAsRead)只需推给 controller
+    // 供 screenTrack 计算 readOnscreen,不触发 rebuild —— 与
+    // _buildPostListContent 里的 ref.read 配对(那里承担 detail 变化时的重算)。
+    ref.listen(topicSessionProvider(widget.topicId), (_, next) {
+      final currentDetail = ref.read(topicDetailProvider(params)).value;
+      if (currentDetail == null) return;
+      final readPostNumbers = <int>{
+        for (final post in currentDetail.postStream.posts)
+          if (post.read) post.postNumber,
+        ...next.readPostNumbers,
+      };
+      _updateReadPostNumbers(readPostNumbers);
+    });
+
+    _maybeSwitchToMasterDetail(canShowDetailPane);
 
     // 监听 MessageBus 事件
     ref.listen(topicChannelProvider(widget.topicId), (previous, next) {
@@ -1570,14 +1762,12 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
             .clearSharedIssueUpdate();
       }
 
-      // 4. 帖子级别更新（created/revised/deleted/liked 等）
-      final prevLen = previous?.postUpdates.length ?? 0;
-      final nextLen = next.postUpdates.length;
-      if (nextLen > prevLen) {
-        final newUpdates = next.postUpdates.sublist(prevLen);
-        for (final update in newUpdates) {
-          _handlePostUpdate(notifier, update);
-        }
+      // 4. 帖子级别更新（created/revised/deleted/liked 等）:
+      // generation 变化 = 新一批(postUpdates 即该批全量,由频道层在
+      // 微任务边界攒批)。批入口统一做去重与积压坍缩。
+      if (next.postUpdatesGeneration !=
+          (previous?.postUpdatesGeneration ?? 0)) {
+        _handlePostUpdateBatch(notifier, next.postUpdates);
       }
     });
 
@@ -1604,16 +1794,11 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
           });
         }
       }
-      final posts = detail?.postStream.posts;
+      // 与 _buildPostListContent 一致，用过滤后列表判断 1 楼是否存在
+      final posts = detail == null
+          ? null
+          : _filteredDetail(detail).postStream.posts;
       if (posts != null && posts.isNotEmpty) {
-        final htmlList = posts.map((p) => p.cooked).toList();
-        ChunkedHtmlContent.preloadAll(htmlList);
-
-        // 预热 Pangu 混排处理（在 isolate 中执行）
-        if (ref.read(preferencesProvider).displayPanguSpacing) {
-          DiscourseHtmlContent.preloadPangu(htmlList);
-        }
-
         final hasFirstPost = posts.first.postNumber == 1;
         if (_hasFirstPost != hasFirstPost) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1707,7 +1892,7 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     }
 
     // 首次引导检查（仅滑动入口模式）
-    if (useSwipeEntry && hasAiModel && !_aiGuideChecked && detail != null) {
+    if (useSwipeEntry && hasAiModel && !_aiGuideChecked && hasDetail) {
       _aiGuideChecked = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
@@ -1717,9 +1902,35 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
       });
     }
 
+    // AppBar 两个分支高度恒为 kToolbarHeight(搜索 AppBar 无 bottom,
+    // 正常分支自身就是 PreferredSize(kToolbarHeight)),外层声明恒定
+    // 高度后,内部随 detail 重建不影响 Scaffold 布局
     final topicScaffold = Scaffold(
-      appBar: _buildAppBar(theme: theme, detail: detail, notifier: notifier),
-      body: _buildBody(context, detailAsync, detail, notifier, isLoggedIn),
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(kToolbarHeight),
+        child: Consumer(
+          builder: (context, ref, _) {
+            final detail = ref.watch(topicDetailProvider(params)).value;
+            return _buildAppBar(
+              theme: theme,
+              detail: detail,
+              notifier: notifier,
+            );
+          },
+        ),
+      ),
+      body: Consumer(
+        builder: (context, ref, _) {
+          final detailAsync = ref.watch(topicDetailProvider(params));
+          return _buildBody(
+            context,
+            detailAsync,
+            detailAsync.value,
+            notifier,
+            isLoggedIn,
+          );
+        },
+      ),
     );
 
     // 无 AI 模型或非滑动入口模式：普通布局
@@ -1779,28 +1990,37 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
               children: [
                 _KeepAlivePage(child: topicScaffold),
                 _KeepAlivePage(
-                  child: AiChatPage(
-                    topicId: widget.topicId,
-                    detail: detail,
-                    embedded: true,
-                    onReplyToTopic: detail == null
-                        ? null
-                        : (imageMarkdown) {
-                            _pageController.animateToPage(
-                              0,
-                              duration: const Duration(milliseconds: 300),
-                              curve: Curves.easeOutCubic,
-                            );
-                            showReplySheet(
-                              context: context,
-                              topicId: widget.topicId,
-                              categoryId: detail.categoryId,
-                              initialContent: '$imageMarkdown\n',
-                              topicTitle: detail.title,
-                              isPrivateMessageTopic: detail.isPrivateMessage,
-                              isPmWithNonHumanUser: detail.pmWithNonHumanUser,
-                            );
-                          },
+                  child: Consumer(
+                    builder: (context, ref, _) {
+                      final detail = ref
+                          .watch(topicDetailProvider(params))
+                          .value;
+                      return AiChatPage(
+                        topicId: widget.topicId,
+                        detail: detail,
+                        embedded: true,
+                        onReplyToTopic: detail == null
+                            ? null
+                            : (imageMarkdown) {
+                                _pageController.animateToPage(
+                                  0,
+                                  duration: const Duration(milliseconds: 300),
+                                  curve: Curves.easeOutCubic,
+                                );
+                                showReplySheet(
+                                  context: context,
+                                  topicId: widget.topicId,
+                                  categoryId: detail.categoryId,
+                                  initialContent: '$imageMarkdown\n',
+                                  topicTitle: detail.title,
+                                  isPrivateMessageTopic:
+                                      detail.isPrivateMessage,
+                                  isPmWithNonHumanUser:
+                                      detail.pmWithNonHumanUser,
+                                );
+                              },
+                      );
+                    },
                   ),
                 ),
               ],
@@ -1869,6 +2089,16 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
       );
     }
 
+    // 进入转场未完成:先骨架(缓存命中时首帧物化真实列表会把大 build 帧
+    // 砸进转场动画,见 _routeTransitionDone),completed 后下一帧再物化。
+    if (!_routeTransitionDone) {
+      final showHeaderSkeleton =
+          widget.scrollToPostNumber == null || widget.scrollToPostNumber == 0;
+      return _wrapWithConstraint(
+        PostListSkeleton(withHeader: showHeaderSkeleton),
+      );
+    }
+
     if (detailAsync.isLoading && detail == null) {
       final showHeaderSkeleton =
           widget.scrollToPostNumber == null || widget.scrollToPostNumber == 0;
@@ -1930,47 +2160,13 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
           ),
 
         // TopicDetailOverlay (Bottom Bar)
-        // 使用 ValueListenableBuilder 隔离状态变化，避免整页重建
+        // 滚动中高频变化的状态(底栏显隐、楼层号)以 ValueListenable 传入
+        // 并在 Overlay 内部细粒度下沉;此外整个 Overlay 实例按输入签名
+        // 缓存 —— 帖子信息更新(message bus / 分页)触发的整页 rebuild
+        // 中,Overlay 消费的字段一般没变,直接复用实例整棵短路
+        // (实测全量重建一次 4.5~8ms)。
         if (detail != null && !isSearchMode)
-          ValueListenableBuilder<bool>(
-            valueListenable: _controller.showBottomBarNotifier,
-            builder: (context, showBottomBar, _) {
-              return ValueListenableBuilder<int>(
-                valueListenable: _controller.streamIndexNotifier,
-                builder: (context, currentStreamIndex, _) {
-                  return TopicDetailOverlay(
-                    showBottomBar: showBottomBar,
-                    isLoggedIn: isLoggedIn,
-                    currentStreamIndex: currentStreamIndex,
-                    totalCount: detail.postStream.stream.length,
-                    detail: detail,
-                    onScrollToTop: _scrollToTop,
-                    onShare: _shareTopic,
-                    onShareAsImage: _shareAsImage,
-                    onExport: _showExportSheet,
-                    onOpenInBrowser: _openInBrowser,
-                    onReply: () => _handleReply(null),
-                    isReadBoostActive: readBoostState.isRunning,
-                    readBoostProgress: readBoostState.progress,
-                    onShowReadBoost: () => _showReadBoostSheet(detail),
-                    onProgressTap: () => _showTimelineSheet(detail),
-                    onProgressGesture: (action) =>
-                        _handleProgressGesture(action, detail, notifier),
-                    isSummaryMode: notifier.isSummaryMode,
-                    isAuthorOnlyMode: notifier.isAuthorOnlyMode,
-                    isTopLevelMode: notifier.isTopLevelMode,
-                    isNestedMode: _isNestedView,
-                    isLoading: _isSwitchingMode,
-                    onShowTopReplies: _handleShowTopReplies,
-                    onShowAuthorOnly: _handleShowAuthorOnly,
-                    onShowTopLevelReplies: _handleShowTopLevelReplies,
-                    onCancelFilter: _handleCancelFilter,
-                    onShowNestedView: _toggleNestedView,
-                  );
-                },
-              );
-            },
-          ),
+          _buildOverlayCached(detail, notifier, isLoggedIn, readBoostState),
 
         // Expanded Header 相关组件（使用 ValueListenableBuilder 隔离状态变化）
         if (!isSearchMode)
@@ -2036,15 +2232,44 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     );
   }
 
+  /// 对 detail 应用本地屏蔽名单（带身份缓存）。
+  ///
+  /// build 与各 action（跳楼、翻页判断等）都要基于同一份过滤后列表做
+  /// postIndex 数学，riverpod 状态实例与名单实例都未变时直接复用上次
+  /// 结果，避免每次 read 都重新过滤。
+  TopicDetail _filteredDetail(TopicDetail detail) {
+    final blocked = ref.read(preferencesProvider).normalizedBlockedUsernames;
+    if (identical(_blockedFilterInput, detail) &&
+        identical(_blockedFilterBlocked, blocked)) {
+      return _blockedFilterOutput!;
+    }
+    final filtered = BlockedUserFilter.filterTopicDetail(detail, blocked);
+    _blockedFilterInput = detail;
+    _blockedFilterBlocked = blocked;
+    _blockedFilterOutput = filtered;
+    return filtered;
+  }
+
   Widget _buildPostListContent(
     BuildContext context,
     TopicDetail detail,
     TopicDetailNotifier notifier,
     bool isLoggedIn,
   ) {
+    // 本地屏蔽过滤统一在此出口完成：页面内所有 postIndex（centerPostIndex/
+    // dividerPostIndex/滚动映射）都基于同一份过滤后列表，语义天然一致。
+    // watch 保证名单变化时整页重建。
+    final blockedUsernames = ref.watch(
+      preferencesProvider.select((p) => p.normalizedBlockedUsernames),
+    );
+    detail = _filteredDetail(detail);
     final posts = detail.postStream.posts;
     final hasFirstPost = posts.isNotEmpty && posts.first.postNumber == 1;
-    final sessionState = ref.watch(topicSessionProvider(widget.topicId));
+    // read 而非 watch：sessionState 只用于合成 readPostNumbers 推给 controller,
+    // 不驱动任何 UI(未读圆点由 PostItem 内部细粒度 Consumer 自行监听)。
+    // watch 会让每次 timings 上报成功(markAsRead)都整页 rebuild;
+    // session 变化时的推送由 build() 里的 ref.listen 承担。
+    final sessionState = ref.read(topicSessionProvider(widget.topicId));
 
     if (posts.isNotEmpty) {
       final readPostNumbers = <int>{};
@@ -2072,19 +2297,31 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
       }
     }
 
-    // 初始定位
+    // 初始定位：center 直接锚在目标帖，首帧布局即 offset 0 = 目标顶对齐，
+    // 无爬行、无估算。收尾（贴底 anchor + markPositioned）在帧后完成。
+    // _viewportAnchor 不在此处重置：残留值由 _finalizeInitialPosition
+    // 按真实几何重新评估（避免刷新场景闪一帧顶对齐）。
     if (!_controller.hasInitialScrolled && posts.isNotEmpty) {
-      _controller.markInitialScrolled(posts.first.postNumber);
-      final initialTargetPostNumber =
-          _controller.jumpTargetPostNumber ?? _resolvedViewportPostNumber;
-      if (initialTargetPostNumber == null || initialTargetPostNumber == 0) {
+      final target = _resolveInitialTarget(posts, dividerPostIndex);
+      _controller.markInitialScrolled(
+        target != null
+            ? posts[target.index].postNumber
+            : posts.first.postNumber,
+      );
+      if (target == null) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted && !_controller.isPositioned) {
             _controller.markPositioned();
           }
         });
       } else {
-        _scrollToInitialPosition(posts, dividerPostIndex);
+        // 定位前先按目标楼层预置进度条，避免数字从低楼层爬升
+        _primeStreamIndexForInitialTarget(detail, posts, dividerPostIndex);
+        _finalizeInitialPosition(
+          highlightPostNumber: target.shouldHighlight
+              ? posts[target.index].postNumber
+              : null,
+        );
       }
     }
 
@@ -2106,6 +2343,7 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
           nestedState: nestedState,
           params: nestedParams,
           detail: detail,
+          blockedUsernames: blockedUsernames,
           topicId: widget.topicId,
           scrollController: _controller.scrollController,
           headerKey: _headerKey,
@@ -2128,77 +2366,69 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
       return _wrapWithConstraint(nestedView);
     }
 
-    // 使用 Consumer + select 隔离 typingUsers 状态变化，避免整页重建
-    Widget scrollView = Consumer(
-      builder: (context, ref, _) {
-        final typingUsers = ref.watch(
-          topicChannelProvider(widget.topicId).select((s) => s.typingUsers),
-        );
+    // typingUsers 的监听已下沉到 TopicPostList 内部的打字指示器 sliver，
+    // presence 消息不再触发整个列表重建
+    Widget scrollView = ValueListenableBuilder<int?>(
+      valueListenable: _controller.selectedPostNumberNotifier,
+      builder: (context, selectedPostNumber, _) {
         return ValueListenableBuilder<int?>(
-          valueListenable: _controller.selectedPostNumberNotifier,
-          builder: (context, selectedPostNumber, _) {
-            return ValueListenableBuilder<int?>(
-              valueListenable: _controller.highlightNotifier,
-              builder: (context, highlightPostNumber, _) {
-                return TopicPostList(
-                  detail: detail,
-                  scrollController: _controller.scrollController,
-                  centerKey: _centerKey,
-                  headerKey: _headerKey,
-                  hideHeaderTitle: widget.hideInlineHeaderTitle,
-                  selectedPostNumber: selectedPostNumber,
-                  highlightPostNumber: highlightPostNumber,
-                  highlightBoostUsername: widget.highlightBoostUsername,
-                  typingUsers: typingUsers,
-                  isLoggedIn: isLoggedIn,
-                  hasMoreBefore: notifier.hasMoreBefore,
-                  hasMoreAfter: notifier.hasMoreAfter,
-                  isLoadingPrevious: notifier.isLoadingPrevious,
-                  isLoadingMore: notifier.isLoadingMore,
-                  isLoadMoreFailed: notifier.isLoadMoreFailed,
-                  isLoadPreviousFailed: notifier.isLoadPreviousFailed,
-                  onRetryLoadMore: () => notifier.retryLoadMore(),
-                  onRetryLoadPrevious: () => notifier.retryLoadPrevious(),
-                  centerPostIndex: centerPostIndex,
-                  dividerPostIndex: dividerPostIndex,
-                  onFirstVisiblePostChanged: _updateStreamIndexForPostNumber,
-                  onVisiblePostsChanged: _updateVisiblePosts,
-                  onScrollIndexMappingChanged:
-                      _controller.updateScrollIndexMapping,
-                  onScrollIndexToPostNumberChanged:
-                      _controller.updateScrollIndexToPostNumber,
-                  onPostSegmentRangesChanged:
-                      _controller.updatePostSegmentRanges,
-                  onJumpToPost: _scrollToPost,
-                  onReply: _handleReply,
-                  onEdit: _handleEdit,
-                  onShareAsImage: _sharePostAsImage,
-                  onRefreshPost: _handleRefreshPost,
-                  onVoteChanged: _handleVoteChanged,
-                  onSharedIssueChanged: _handleSharedIssueChanged,
-                  onNotificationLevelChanged: (level) =>
-                      _handleNotificationLevelChanged(notifier, level),
-                  onSolutionChanged: _handleSolutionChanged,
-                  onQuoteSelection: isLoggedIn ? _handleQuoteSelection : null,
-                  onQuoteImage: isLoggedIn ? _handleImageQuote : null,
-                  onScrollNotification: _controller.handleScrollNotification,
-                  onPointerScroll: _controller.handlePointerScroll,
-                  onFillGapBefore: (postId) => notifier.fillGapBefore(postId),
-                  onFillGapAfter: (postId) => notifier.fillGapAfter(postId),
-                  onExpandHiddenPost: (postId) =>
-                      notifier.expandHiddenPost(postId),
-                  useReplyDialog: notifier.isTopLevelMode,
-                  onShowPostDetail: (post) => showPostRepliesSheet(
-                    context: context,
-                    post: post,
-                    topicId: widget.topicId,
-                    topicTitle: detail.title,
-                    isPrivateMessageTopic: detail.isPrivateMessage,
-                    isPmWithNonHumanUser: detail.pmWithNonHumanUser,
-                    onJumpToPost: _scrollToPost,
-                  ),
-                );
-              },
+          valueListenable: _controller.highlightNotifier,
+          builder: (context, highlightPostNumber, _) {
+            return TopicPostList(
+              detail: detail,
+              scrollController: _controller.scrollController,
+              centerKey: _centerKey,
+              viewportAnchor: _viewportAnchor,
+              headerKey: _headerKey,
+              hideHeaderTitle: widget.hideInlineHeaderTitle,
+              selectedPostNumber: selectedPostNumber,
+              highlightPostNumber: highlightPostNumber,
+              highlightBoostUsername: widget.highlightBoostUsername,
+              isLoggedIn: isLoggedIn,
+              hasMoreBefore: notifier.hasMoreBefore,
+              hasMoreAfter: notifier.hasMoreAfter,
+              loadingPreviousListenable: notifier.loadingPreviousListenable,
+              loadingMoreListenable: notifier.loadingMoreListenable,
+              loadMoreFailedListenable: notifier.loadMoreFailedListenable,
+              loadPreviousFailedListenable:
+                  notifier.loadPreviousFailedListenable,
+              onRetryLoadMore: () => notifier.retryLoadMore(),
+              onRetryLoadPrevious: () => notifier.retryLoadPrevious(),
+              centerPostIndex: centerPostIndex,
+              dividerPostIndex: dividerPostIndex,
+              onFirstVisiblePostChanged: _updateStreamIndexForPostNumber,
+              onVisiblePostsChanged: _updateVisiblePosts,
+              onScrollIndexMappingChanged: _controller.updateScrollIndexMapping,
+              onScrollIndexToPostNumberChanged:
+                  _controller.updateScrollIndexToPostNumber,
+              onPostSegmentRangesChanged: _controller.updatePostSegmentRanges,
+              onJumpToPost: _scrollToPost,
+              onReply: _handleReply,
+              onEdit: _handleEdit,
+              onShareAsImage: _sharePostAsImage,
+              onRefreshPost: _handleRefreshPost,
+              onVoteChanged: _handleVoteChanged,
+              onSharedIssueChanged: _handleSharedIssueChanged,
+              onNotificationLevelChanged: (level) =>
+                  _handleNotificationLevelChanged(notifier, level),
+              onSolutionChanged: _handleSolutionChanged,
+              onQuoteSelection: isLoggedIn ? _handleQuoteSelection : null,
+              onQuoteImage: isLoggedIn ? _handleImageQuote : null,
+              onScrollNotification: _controller.handleScrollNotification,
+              onPointerScroll: _controller.handlePointerScroll,
+              onFillGapBefore: (postId) => notifier.fillGapBefore(postId),
+              onFillGapAfter: (postId) => notifier.fillGapAfter(postId),
+              onExpandHiddenPost: (postId) => notifier.expandHiddenPost(postId),
+              useReplyDialog: notifier.isTopLevelMode,
+              onShowPostDetail: (post) => showPostRepliesSheet(
+                context: context,
+                post: post,
+                topicId: widget.topicId,
+                topicTitle: detail.title,
+                isPrivateMessageTopic: detail.isPrivateMessage,
+                isPmWithNonHumanUser: detail.pmWithNonHumanUser,
+                onJumpToPost: _scrollToPost,
+              ),
             );
           },
         );

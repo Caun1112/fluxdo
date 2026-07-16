@@ -8,12 +8,15 @@ import '../../providers/nested_topic_provider.dart';
 import '../../providers/preferences_provider.dart';
 import '../../providers/topic_session_provider.dart';
 import '../../pages/user_profile_page.dart';
+import '../../utils/blocked_user_filter.dart';
+import '../../utils/fluxdo_render_callbacks.dart';
 import '../../utils/responsive.dart';
 import '../../utils/time_utils.dart';
-import '../content/collapsed_html_content.dart';
-import '../content/discourse_html_content/chunked/chunked_html_content.dart';
 import '../post/post_item/widgets/post_footer_section/post_footer_section.dart';
+import '../post/post_signature_block.dart';
+import '../common/radial_long_press_menu.dart';
 import '../common/smart_avatar.dart';
+import '../user/avatar_action_menu.dart';
 import 'nested_collapsed_bar.dart';
 import 'nested_post_gutter.dart';
 import 'nested_thread_sheet.dart';
@@ -53,6 +56,7 @@ class NestedPostCard extends ConsumerStatefulWidget {
   final int maxDepth;
   final bool isLastChild;
   final bool isLoggedIn;
+  final Set<String> blockedUsernames;
   final void Function(Post? replyToPost, {String? initialContent}) onReply;
   final void Function(Post post) onEdit;
   final void Function(int postId) onRefreshPost;
@@ -75,6 +79,7 @@ class NestedPostCard extends ConsumerStatefulWidget {
     this.maxDepth = 10,
     this.isLastChild = false,
     required this.isLoggedIn,
+    required this.blockedUsernames,
     required this.onReply,
     required this.onEdit,
     required this.onRefreshPost,
@@ -97,6 +102,26 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
   int _page = 0;
   bool _depthLineHovered = false;
 
+  /// 过滤结果缓存：visibleNestedNodes 递归复制整棵子树，开销不小；
+  /// _children 只在明确的变更点（insert/addAll）改动，名单变化走
+  /// didUpdateWidget，两处都手动失效即可安全复用
+  List<NestedNode>? _visibleChildrenCache;
+
+  List<NestedNode> get _visibleChildren =>
+      _visibleChildrenCache ??= BlockedUserFilter.visibleNestedNodes(
+        _children,
+        widget.blockedUsernames,
+      );
+
+  @override
+  void didUpdateWidget(covariant NestedPostCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.blockedUsernames, widget.blockedUsernames) ||
+        !identical(oldWidget.node, widget.node)) {
+      _visibleChildrenCache = null;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -109,7 +134,7 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
       _expanded = cached;
       _collapsed = !cached && _hasReplies;
     } else {
-      _expanded = _children.isNotEmpty;
+      _expanded = _visibleChildren.isNotEmpty;
       _collapsed = false;
     }
 
@@ -130,6 +155,7 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
 
         setState(() {
           _children.insert(0, NestedNode(post: next.post));
+          _visibleChildrenCache = null;
           _expanded = true;
           _collapsed = false;
           widget.expansionState?[widget.node.post.postNumber] = true;
@@ -139,7 +165,7 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
   }
 
   bool get _hasReplies =>
-      widget.node.directReplyCount > 0 || _children.isNotEmpty;
+      widget.node.directReplyCount > 0 || _visibleChildren.isNotEmpty;
   bool get _atMaxDepth => widget.depth >= widget.maxDepth;
   bool get _showDepthLine => _hasReplies && !_collapsed && !_atMaxDepth;
 
@@ -159,7 +185,7 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
       } else {
         _expanded = true;
         _collapsed = false;
-        if (_children.isEmpty && widget.node.directReplyCount > 0) {
+        if (_visibleChildren.isEmpty && widget.node.directReplyCount > 0) {
           _loadChildren();
         }
       }
@@ -181,6 +207,7 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
       if (!mounted) return;
       setState(() {
         _children.addAll(response.children);
+        _visibleChildrenCache = null;
         _hasMore = response.hasMore;
         _page = response.page + 1;
         _isLoadingMore = false;
@@ -280,6 +307,9 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
               username: post.username,
               post: post,
               topicId: widget.topicId,
+              onMentionUser: widget.isLoggedIn
+                  ? (u) => widget.onReply(null, initialContent: '@$u ')
+                  : null,
             ),
           const SizedBox(width: _columnGap),
           Expanded(child: contentColumn),
@@ -340,7 +370,7 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
         !_atMaxDepth &&
         _expanded &&
         !_collapsed &&
-        (_children.isNotEmpty || _isLoadingMore || _hasMore);
+        (_visibleChildren.isNotEmpty || _isLoadingMore || _hasMore);
     final bool showExpandBtn =
         !_atMaxDepth && !_expanded && !_collapsed && _hasReplies;
 
@@ -507,47 +537,30 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
         _buildHeader(theme, post, isOp, isMobile: isMobile),
         const SizedBox(height: 4),
         // Content
-        ChunkedHtmlContent(
-          html: post.cooked,
-          textStyle: theme.textTheme.bodyMedium?.copyWith(
+        FluxdoRenderCallbacks.forPost(
+          post: post,
+          topicId: widget.topicId,
+        ).render(
+          cookedHtml: post.cooked,
+          baseTextStyle: theme.textTheme.bodyMedium?.copyWith(
             height: 1.5,
             fontSize:
                 (theme.textTheme.bodyMedium?.fontSize ?? 14) *
                 ref.watch(preferencesProvider).contentFontScale,
           ),
-          post: post,
-          topicId: widget.topicId,
+          selectionEnabled: false,
         ),
         // 用户签名
-        if (ref.watch(preferencesProvider).showSignatures &&
-            post.signatureCooked != null &&
-            post.signatureCooked!.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Container(
-              padding: const EdgeInsets.only(top: 6),
-              decoration: BoxDecoration(
-                border: Border(
-                  top: BorderSide(
-                    color: theme.colorScheme.outlineVariant.withValues(
-                      alpha: 0.3,
-                    ),
-                    width: 0.5,
-                  ),
-                ),
-              ),
-              child: CollapsedHtmlContent(
-                html: post.signatureCooked!,
-                textStyle: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant.withValues(
-                    alpha: 0.6,
-                  ),
-                  fontSize: 11,
-                  height: 1.4,
-                ),
-                maxLines: 2,
-              ),
-            ),
+        if (PostSignatureBlock.shouldRender(
+          ref,
+          post,
+          categoryId: widget.detail.categoryId,
+        ))
+          PostSignatureBlock(
+            post: post,
+            categoryId: widget.detail.categoryId,
+            fontSize: 11,
+            spacing: 6,
           ),
         // 完整操作栏（复用 PostFooterSection，隐藏回复展开按钮）
         PostFooterSection(
@@ -600,13 +613,36 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
   }) {
     return Row(
       children: [
-        // 移动端内联头像
+        // 移动端内联头像（点击进主页，长按弹径向操作菜单）
         if (isMobile) ...[
-          GestureDetector(
+          RadialLongPressMenu(
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(
                 builder: (_) => UserProfilePage(username: post.username),
+              ),
+            ),
+            itemsBuilder: () => buildAvatarMenuItems(
+              context,
+              username: post.username,
+              topicId: widget.topicId,
+              postNumber: post.postNumber,
+              onMentionUser: widget.isLoggedIn
+                  ? (u) => widget.onReply(null, initialContent: '@$u ')
+                  : null,
+            ),
+            pressAreaIndicatorBuilder: (ctx, rect, opacity) => Opacity(
+              opacity: opacity,
+              child: SmartAvatar(
+                imageUrl: post.avatarTemplate.isNotEmpty
+                    ? NestedPostAvatar.resolveUrl(post.avatarTemplate)
+                    : null,
+                radius: rect.shortestSide / 2,
+                fallbackText: post.username,
+                border: Border.all(
+                  color: Theme.of(ctx).colorScheme.primary,
+                  width: 2,
+                ),
               ),
             ),
             child: SmartAvatar(
@@ -745,20 +781,22 @@ class _NestedPostCardState extends ConsumerState<NestedPostCard> {
   }
 
   Widget _buildChildren(ThemeData theme, {bool isMobile = false}) {
+    final children = _visibleChildren;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (int i = 0; i < _children.length; i++)
+        for (int i = 0; i < children.length; i++)
           NestedPostCard(
-            node: _children[i],
+            node: children[i],
             topicId: widget.topicId,
             detail: widget.detail,
             params: widget.params,
             depth: widget.depth + 1,
             maxDepth: widget.maxDepth,
-            isLastChild: i == _children.length - 1 && !_hasMore,
+            isLastChild: i == children.length - 1 && !_hasMore,
             isLoggedIn: widget.isLoggedIn,
+            blockedUsernames: widget.blockedUsernames,
             onReply: widget.onReply,
             onEdit: widget.onEdit,
             onRefreshPost: widget.onRefreshPost,

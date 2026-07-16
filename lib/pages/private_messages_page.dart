@@ -283,7 +283,13 @@ class _PrivateMessageTabViewState extends ConsumerState<_PrivateMessageTabView>
 
           return ListView.builder(
             controller: _scrollController,
-            padding: const EdgeInsets.all(12),
+            // 底部让出 extendBody 注入的底栏高度
+            padding: EdgeInsets.fromLTRB(
+              12,
+              12,
+              12,
+              12 + MediaQuery.paddingOf(context).bottom,
+            ),
             itemCount: topics.length + 1,
             itemBuilder: (context, index) {
               if (index == topics.length) {
@@ -300,11 +306,13 @@ class _PrivateMessageTabViewState extends ConsumerState<_PrivateMessageTabView>
                 isSelected: false,
                 onTap: () => _onItemTap(topic),
                 enableLongPress: enableLongPress,
+                // 私信语义同邮件:发件人优先的 Gmail 式布局
+                messageStyle: true,
               );
             },
           );
         },
-        loading: () => const TopicListSkeleton(),
+        loading: () => const TopicListSkeleton(messageStyle: true),
         error: (error, stack) =>
             ErrorView(error: error, stackTrace: stack, onRetry: _onRefresh),
       ),

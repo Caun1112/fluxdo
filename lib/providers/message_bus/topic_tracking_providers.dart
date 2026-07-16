@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../services/message_bus_service.dart';
@@ -79,6 +81,7 @@ class TrackedTopicState {
 /// 全局话题追踪状态 Notifier
 /// 对齐 Discourse 网页版的 topic-tracking-state.js
 class TopicTrackingStateNotifier extends Notifier<Map<int, TrackedTopicState>> {
+  bool _loadingPreloadedStates = false;
 
   @override
   Map<int, TrackedTopicState> build() {
@@ -86,22 +89,45 @@ class TopicTrackingStateNotifier extends Notifier<Map<int, TrackedTopicState>> {
     final preloaded = PreloadedDataService();
     final states = preloaded.topicTrackingStatesSync;
     if (states != null) {
-      final map = <int, TrackedTopicState>{};
-      for (final json in states) {
-        final tracked = TrackedTopicState.fromJson(json);
-        map[tracked.topicId] = tracked;
-      }
-      // 调试：打印首条数据的字段和计数
-      if (states.isNotEmpty) {
-        debugPrint('[TopicTrackingState] 首条原始数据 keys: ${states.first.keys.toList()}');
-        debugPrint('[TopicTrackingState] 首条原始数据: ${states.first}');
-      }
-      final newCount = map.values.where((s) => _isNew(s)).length;
-      final unreadCount = map.values.where((s) => _isUnread(s)).length;
-      debugPrint('[TopicTrackingState] 从预加载数据初始化 ${map.length} 条追踪状态, new=$newCount, unread=$unreadCount');
-      return map;
+      return _buildPreloadedStateMap(states);
     }
+    _loadPreloadedStatesAsync(preloaded);
     return {};
+  }
+
+  Map<int, TrackedTopicState> _buildPreloadedStateMap(
+    List<Map<String, dynamic>> states,
+  ) {
+    final map = <int, TrackedTopicState>{};
+    for (final json in states) {
+      final tracked = TrackedTopicState.fromJson(json);
+      map[tracked.topicId] = tracked;
+    }
+    // 调试：打印首条数据的字段和计数
+    if (states.isNotEmpty) {
+      debugPrint('[TopicTrackingState] 首条原始数据 keys: ${states.first.keys.toList()}');
+      debugPrint('[TopicTrackingState] 首条原始数据: ${states.first}');
+    }
+    final newCount = map.values.where((s) => _isNew(s)).length;
+    final unreadCount = map.values.where((s) => _isUnread(s)).length;
+    debugPrint('[TopicTrackingState] 从预加载数据初始化 ${map.length} 条追踪状态, new=$newCount, unread=$unreadCount');
+    return map;
+  }
+
+  void _loadPreloadedStatesAsync(PreloadedDataService preloaded) {
+    if (_loadingPreloadedStates) return;
+    _loadingPreloadedStates = true;
+    unawaited(
+      preloaded.getTopicTrackingStates().then((states) {
+        _loadingPreloadedStates = false;
+        if (!ref.mounted || states == null) return;
+        final loaded = _buildPreloadedStateMap(states);
+        state = state.isEmpty ? loaded : {...loaded, ...state};
+      }).catchError((Object e, StackTrace st) {
+        _loadingPreloadedStates = false;
+        debugPrint('[TopicTrackingState] 异步加载预加载追踪状态失败: $e');
+      }),
+    );
   }
 
   /// 统计 NEW 话题数量（对齐网页版 countNew）
@@ -479,8 +505,10 @@ class LatestChannelNotifier extends Notifier<TopicListIncomingState> {
 
       debugPrint('[LatestChannel] incoming +1: type=$messageType, topicId=$topicId, category=$topicCategoryId');
 
-      // 同步转发给 TopicTrackingStateNotifier 更新 new/unread 计数
-      ref.read(topicTrackingStateProvider.notifier).processChannelPayload(message);
+      // 注意:不在此处转发给 TopicTrackingStateNotifier —— MessageBusInit
+      // 已订阅含 /latest 在内的全部追踪频道并统一转发,此前这里的二次
+      // 转发让每条 /latest 消息被同一状态机处理两遍(两次解析 + 两次
+      // 通知 + 下游两次重建;滚动中即"帧开工晚"型掉帧的税源之一)
 
       // 即时更新（与网页版一致，无防抖）
       state = TopicListIncomingState(

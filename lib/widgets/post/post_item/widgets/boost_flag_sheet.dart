@@ -1,12 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:app_icons/app_icons.dart';
-import 'package:flutter_widget_from_html/flutter_widget_from_html.dart';
 
 import '../../../../l10n/s.dart';
 import '../../../../models/topic.dart';
 import '../../../../services/preloaded_data_service.dart';
 import '../../../../services/toast_service.dart';
-import '../../../../utils/url_helper.dart';
+import '../../../../utils/fluxdo_render_callbacks.dart';
 import '../../../common/app_bottom_sheet.dart';
 
 typedef BoostFlagTypesLoader = Future<List<FlagType>> Function();
@@ -60,6 +59,18 @@ bool canOpenBoostActionMenu({
 }) {
   return canDeleteBoostAction(boost: boost, currentUsername: currentUsername) ||
       canFlagBoostAction(boost: boost, currentUsername: currentUsername);
+}
+
+bool canViewBoostAuthor({required Boost boost}) {
+  return boost.user.username.trim().isNotEmpty;
+}
+
+bool canShowBoostActionSheet({
+  required Boost boost,
+  required String? currentUsername,
+}) {
+  return canViewBoostAuthor(boost: boost) ||
+      canOpenBoostActionMenu(boost: boost, currentUsername: currentUsername);
 }
 
 List<FlagType> filterBoostFlagTypes({
@@ -343,6 +354,7 @@ class _BoostFlagSheetState extends State<BoostFlagSheet> {
     final isSelected = _selectedType?.id == type.id;
     final description = _replaceDescription(type.description);
     return InkWell(
+      key: ValueKey('boost-flag-option-${type.nameKey}'),
       onTap: () => setState(() => _selectedType = type),
       borderRadius: BorderRadius.circular(12),
       child: Container(
@@ -363,7 +375,9 @@ class _BoostFlagSheetState extends State<BoostFlagSheet> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Icon(
-              isSelected ? Symbols.radio_button_checked_rounded : Symbols.radio_button_unchecked_rounded,
+              isSelected
+                  ? Symbols.radio_button_checked_rounded
+                  : Symbols.radio_button_unchecked_rounded,
               size: 20,
               color: isSelected
                   ? theme.colorScheme.primary
@@ -378,22 +392,15 @@ class _BoostFlagSheetState extends State<BoostFlagSheet> {
   }
 
   Widget _buildDescriptionText(String description, ThemeData theme) {
-    return HtmlWidget(
-      description,
-      textStyle: theme.textTheme.bodySmall?.copyWith(
-        color: theme.colorScheme.onSurfaceVariant,
-      ),
-      customStylesBuilder: (element) {
-        if (element.localName == 'a') {
-          return {'text-decoration': 'none'};
-        }
-        return null;
-      },
-      onTapUrl: (url) {
-        final fullUrl = UrlHelper.resolveUrl(url);
-        debugPrint('Open URL: $fullUrl');
-        return true;
-      },
-    );
+    // 只读描述，用新引擎 FluxdoRender 渲染；链接点击由 generic 内置
+    // linkHandler(launchContentLink)处理。
+    return FluxdoRenderCallbacks.generic(heroTagNamespace: 'boost_flag_desc')
+        .render(
+          cookedHtml: description,
+          baseTextStyle: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+          selectionEnabled: false,
+        );
   }
 }

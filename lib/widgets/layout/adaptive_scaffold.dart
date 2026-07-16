@@ -12,6 +12,7 @@ import '../notification/notification_quick_panel.dart';
 import 'adaptive_navigation.dart';
 import 'category_shortcuts.dart';
 import '../topic/category_tab_manager_sheet.dart';
+import '../topic/category_drawer.dart';
 
 /// 自适应 Scaffold
 ///
@@ -54,16 +55,6 @@ class AdaptiveScaffold extends ConsumerWidget {
         ? -1
         : selectedIndex;
 
-    // 始终 watch barVisibilityProvider，避免条件 watch 导致 Riverpod 行为不一致
-    final hideBarOnScroll = ref.watch(
-      preferencesProvider.select((p) => p.hideBarOnScroll),
-    );
-    final barVisibility = ref.watch(barVisibilityProvider);
-    final visibility =
-        (selectedIndex == 0 && hideBarOnScroll) || barVisibility == 0.0
-        ? barVisibility
-        : 1.0;
-
     final hasAcrylic = Platform.isMacOS || Platform.isWindows;
     final useAcrylicRail = showRail && hasAcrylic;
     final railWidth = extendedRail ? 180.0 : 72.0;
@@ -75,6 +66,9 @@ class AdaptiveScaffold extends ConsumerWidget {
       children: [
         Scaffold(
           backgroundColor: useAcrylicRail ? Colors.transparent : null,
+          // 底栏隐藏改为整条平移出屏（paint-only），内容延伸到底栏后面;
+          // body 高度不再随底栏显隐变化，收放过程零 relayout
+          extendBody: true,
           body: Row(
             children: [
               if (showRail) ...[
@@ -143,10 +137,9 @@ class AdaptiveScaffold extends ConsumerWidget {
             ],
           ),
           floatingActionButton: floatingActionButton,
-          bottomNavigationBar: showRail || visibility == 0.0
+          bottomNavigationBar: showRail
               ? null
               : _AnimatedBottomNav(
-                  visibility: visibility,
                   selectedIndex: selectedIndex,
                   onDestinationSelected: onDestinationSelected,
                   destinations: destinations,
@@ -155,6 +148,24 @@ class AdaptiveScaffold extends ConsumerWidget {
         Positioned.fill(
           left: overlayLeftInset,
           child: const SidebarNotificationPanel(),
+        ),
+        // 分类侧栏：宿主挂本层 Stack 末位（盖得住底栏/FAB，被详情页
+        // 路由天然遮挡）。打开方式：☰ / chips ＋ / 首页"全部"tab 整页
+        // 右滑跟手拖出（TabBarView 首缘 overscroll 逐帧喂 dragBy，见
+        // TopicsPage）。受控实现（非 DrawerController：其拖拽驱动是
+        // 私有 API，做不了外部逐帧喂增量的跟手拖出）。
+        ControlledCategoryDrawer(
+          key: CategoryDrawerHost.drawerKey,
+          onPinnedSelected: (category) {
+            // 与 rail 的 CategoryShortcuts 同通路：首页监听
+            // activeSidebarCategoryIdProvider 切分类 tab
+            sidebarCategoryController.state = category.id;
+            if (selectedIndex != 0) {
+              onDestinationSelected(0);
+            }
+            ref.read(currentTabCategoryIdProvider.notifier).state =
+                category.id;
+          },
         ),
       ],
     );
@@ -220,34 +231,49 @@ class _SidebarCategoryAddButton extends StatelessWidget {
   }
 }
 
-/// 带动画的底部导航栏
+/// 带动画的底部导航栏：随 [barVisibilityProvider] 整条平移出屏
+/// （原生 Android HideBottomViewOnScrollBehavior 同款滑出式）。
+///
+/// watch 收在本组件内部 —— 首页收缩逐帧写 visibility 时只有这一个
+/// 节点 rebuild，不再打穿 AdaptiveScaffold 整页（旧实现整个 Scaffold
+/// 连带 IndexedStack 七个 tab 页顶层每帧 update）。FractionalTranslation
+/// 是 paint 期平移：不改布局，Scaffold body 尺寸恒定，hit-test 跟随
+/// 平移，滑出后不挡列表触摸。导航栏本体走 Consumer.child 稳定实例，
+/// 每帧只更新平移量，子树零 diff。
 class _AnimatedBottomNav extends StatelessWidget {
   const _AnimatedBottomNav({
-    required this.visibility,
     required this.selectedIndex,
     required this.onDestinationSelected,
     required this.destinations,
   });
 
-  final double visibility;
   final int selectedIndex;
   final ValueChanged<int> onDestinationSelected;
   final List<AdaptiveDestination> destinations;
 
   @override
   Widget build(BuildContext context) {
-    return ClipRect(
-      child: Align(
-        alignment: Alignment.topCenter,
-        heightFactor: visibility,
-        child: Opacity(
-          opacity: visibility,
-          child: AdaptiveBottomNavigation(
-            selectedIndex: selectedIndex,
-            onDestinationSelected: onDestinationSelected,
-            destinations: destinations,
-          ),
-        ),
+    return Consumer(
+      builder: (context, ref, child) {
+        final hideBarOnScroll = ref.watch(
+          preferencesProvider.select((p) => p.hideBarOnScroll),
+        );
+        final barVisibility = ref.watch(barVisibilityProvider);
+        // 首页开启滚动折叠时跟随进度；其他页恒显。barVisibility == 0.0
+        // 是各页的"强制隐藏"通道（如书签工作台模式），任何 tab 都生效。
+        final visibility =
+            (selectedIndex == 0 && hideBarOnScroll) || barVisibility == 0.0
+            ? barVisibility
+            : 1.0;
+        return FractionalTranslation(
+          translation: Offset(0, 1.0 - visibility),
+          child: child,
+        );
+      },
+      child: AdaptiveBottomNavigation(
+        selectedIndex: selectedIndex,
+        onDestinationSelected: onDestinationSelected,
+        destinations: destinations,
       ),
     );
   }

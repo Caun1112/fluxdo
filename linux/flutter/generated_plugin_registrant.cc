@@ -11,10 +11,13 @@
 #include <flutter_acrylic/flutter_acrylic_plugin.h>
 #include <flutter_avif_linux/flutter_avif_linux_plugin.h>
 #include <flutter_inappwebview_linux/flutter_inappwebview_linux_plugin.h>
+#include <flutter_js/flutter_js_plugin.h>
 #include <flutter_secure_storage_linux/flutter_secure_storage_linux_plugin.h>
 #include <flutter_timezone/flutter_timezone_plugin.h>
 #include <gtk/gtk_plugin.h>
 #include <irondash_engine_context/irondash_engine_context_plugin.h>
+#include <quickjs_engine/quickjs_engine_plugin.h>
+#include <record_linux/record_linux_plugin.h>
 #include <screen_retriever_linux/screen_retriever_linux_plugin.h>
 #include <super_native_extensions/super_native_extensions_plugin.h>
 #include <url_launcher_linux/url_launcher_plugin.h>
@@ -36,6 +39,9 @@ void fl_register_plugins(FlPluginRegistry* registry) {
   g_autoptr(FlPluginRegistrar) flutter_inappwebview_linux_registrar =
       fl_plugin_registry_get_registrar_for_plugin(registry, "FlutterInappwebviewLinuxPlugin");
   flutter_inappwebview_linux_plugin_register_with_registrar(flutter_inappwebview_linux_registrar);
+  g_autoptr(FlPluginRegistrar) flutter_js_registrar =
+      fl_plugin_registry_get_registrar_for_plugin(registry, "FlutterJsPlugin");
+  flutter_js_plugin_register_with_registrar(flutter_js_registrar);
   g_autoptr(FlPluginRegistrar) flutter_secure_storage_linux_registrar =
       fl_plugin_registry_get_registrar_for_plugin(registry, "FlutterSecureStorageLinuxPlugin");
   flutter_secure_storage_linux_plugin_register_with_registrar(flutter_secure_storage_linux_registrar);
@@ -48,6 +54,12 @@ void fl_register_plugins(FlPluginRegistry* registry) {
   g_autoptr(FlPluginRegistrar) irondash_engine_context_registrar =
       fl_plugin_registry_get_registrar_for_plugin(registry, "IrondashEngineContextPlugin");
   irondash_engine_context_plugin_register_with_registrar(irondash_engine_context_registrar);
+  g_autoptr(FlPluginRegistrar) quickjs_engine_registrar =
+      fl_plugin_registry_get_registrar_for_plugin(registry, "QuickjsEnginePlugin");
+  quickjs_engine_plugin_register_with_registrar(quickjs_engine_registrar);
+  g_autoptr(FlPluginRegistrar) record_linux_registrar =
+      fl_plugin_registry_get_registrar_for_plugin(registry, "RecordLinuxPlugin");
+  record_linux_plugin_register_with_registrar(record_linux_registrar);
   g_autoptr(FlPluginRegistrar) screen_retriever_linux_registrar =
       fl_plugin_registry_get_registrar_for_plugin(registry, "ScreenRetrieverLinuxPlugin");
   screen_retriever_linux_plugin_register_with_registrar(screen_retriever_linux_registrar);

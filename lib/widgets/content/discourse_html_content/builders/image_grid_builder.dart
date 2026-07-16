@@ -253,6 +253,13 @@ class _GridImageTileState extends State<_GridImageTile> {
   }
 
   Widget _buildImageWidget(BuildContext context, String displayUrl, String fullUrl, double displayHeight) {
+    // cover 布局按短边撑满,解码按格子长边 × dpr 双向 cap(fit 策略保持
+    // 宽高比):只 cap 宽的话 1:10 长图会解出上万像素高的超限纹理,
+    // 上传瞬间 raster 冻结(与 LazyImage 同款问题)
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final maxSide =
+        widget.columnWidth > displayHeight ? widget.columnWidth : displayHeight;
+    final cachePx = (maxSide * dpr).round();
     return SizedBox(
       width: widget.columnWidth,
       height: displayHeight,
@@ -262,39 +269,51 @@ class _GridImageTileState extends State<_GridImageTile> {
           onTap: () => _openViewer(context, fullUrl),
           child: Hero(
             tag: widget.heroTag,
-            child: Image(
-              image: discourseImageProvider(displayUrl),
-              fit: BoxFit.cover,
-              width: widget.columnWidth,
-              height: displayHeight,
-              loadingBuilder: (context, child, loadingProgress) {
-                if (loadingProgress == null) return child;
-                return Container(
-                  color: widget.theme.colorScheme.surfaceContainerHighest,
-                  child: Center(
-                    child: SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        value: loadingProgress.expectedTotalBytes != null
-                            ? loadingProgress.cumulativeBytesLoaded /
-                                loadingProgress.expectedTotalBytes!
-                            : null,
+            // RepaintBoundary:加载 spinner 动画/首绘隔离在格子内,
+            // 不连带整个帖子 segment 每帧重绘
+            child: RepaintBoundary(
+              child: Image(
+                image: ResizeImage(
+                  discourseImageProvider(displayUrl),
+                  width: cachePx,
+                  height: cachePx,
+                  policy: ResizeImagePolicy.fit,
+                ),
+                fit: BoxFit.cover,
+                width: widget.columnWidth,
+                height: displayHeight,
+                gaplessPlayback: true,
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return Container(
+                    color: widget.theme.colorScheme.surfaceContainerHighest,
+                    child: Center(
+                      child: RepaintBoundary(
+                        child: SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            value: loadingProgress.expectedTotalBytes != null
+                                ? loadingProgress.cumulativeBytesLoaded /
+                                    loadingProgress.expectedTotalBytes!
+                                : null,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
-                );
-              },
-              errorBuilder: (context, error, stackTrace) {
-                return Container(
-                  color: widget.theme.colorScheme.surfaceContainerHighest,
-                  child: Icon(
-                    Symbols.broken_image_rounded,
-                    color: widget.theme.colorScheme.outline,
-                  ),
-                );
-              },
+                  );
+                },
+                errorBuilder: (context, error, stackTrace) {
+                  return Container(
+                    color: widget.theme.colorScheme.surfaceContainerHighest,
+                    child: Icon(
+                      Symbols.broken_image_rounded,
+                      color: widget.theme.colorScheme.outline,
+                    ),
+                  );
+                },
+              ),
             ),
           ),
         ),

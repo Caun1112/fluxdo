@@ -147,18 +147,27 @@ class Poll {
 class TopicUser {
   final int id;
   final String username;
+  final String? name;
   final String avatarTemplate;
 
   TopicUser({
     required this.id,
     required this.username,
+    this.name,
     required this.avatarTemplate,
   });
+
+  /// 显示名:优先昵称,空则回退 username
+  String get displayName {
+    final n = name?.trim();
+    return (n != null && n.isNotEmpty) ? n : username;
+  }
 
   factory TopicUser.fromJson(Map<String, dynamic> json) {
     return TopicUser(
       id: json['id'] as int,
       username: json['username'] as String? ?? '',
+      name: json['name'] as String?,
       avatarTemplate: json['avatar_template'] as String? ?? '',
     );
   }
@@ -200,6 +209,7 @@ class TopicPoster {
               ? TopicUser(
                   id: userId,
                   username: json['_username'] as String? ?? '',
+                  name: json['_name'] as String?,
                   avatarTemplate: json['_avatar_template'] as String? ?? '',
                 )
               : null),
@@ -632,6 +642,23 @@ class Post {
   // 用户签名（来自 user_custom_fields.signature_cooked）
   final String? signatureCooked;
 
+  // 用户签名（discourse-signatures 插件的 post 顶层 user_signature 字段）：
+  // advanced 模式下是 cooked HTML，普通模式下是图片 URL。
+  final String? userSignature;
+
+  /// 生效的签名内容:与网页端 PostSignature.shouldRender 同语义,
+  /// **只认 post 顶层 user_signature**。
+  ///
+  /// 不回退 user_custom_fields.signature_cooked:用户被移出
+  /// signatures_allowed_groups / 删除签名后,user_signature 立即变 null
+  /// (网页立即隐藏),但 signature_cooked 要等该用户下次 user_updated
+  /// 才被插件清理——期间是陈旧残留,回退会把网页上已隐藏的签名
+  /// (常含已失效图片)复活出来。
+  String? get effectiveSignature {
+    final sig = userSignature;
+    return (sig == null || sig.isEmpty) ? null : sig;
+  }
+
   // Policy 插件（discourse-policy）：
   // 当前用户能否接受/撤销；接受/撤销状态；已/未接受用户摘要列表与计数。
   final bool policyAccepted;
@@ -723,6 +750,7 @@ class Post {
     this.boosts,
     this.canBoost = false,
     this.signatureCooked,
+    this.userSignature,
     this.policyAccepted = false,
     this.policyRevoked = false,
     this.policyCanAccept = false,
@@ -841,6 +869,7 @@ class Post {
           (json['user_custom_fields']
                   as Map<String, dynamic>?)?['signature_cooked']
               as String?,
+      userSignature: json['user_signature'] as String?,
       policyAccepted: json['policy_accepted'] as bool? ?? false,
       policyRevoked: json['policy_revoked'] as bool? ?? false,
       policyCanAccept: json['policy_can_accept'] as bool? ?? false,
@@ -998,6 +1027,7 @@ class Post {
     List<Boost>? boosts,
     bool? canBoost,
     String? signatureCooked,
+    String? userSignature,
     bool clearCurrentUserReaction = false,
     bool? policyAccepted,
     bool? policyRevoked,
@@ -1082,6 +1112,7 @@ class Post {
       boosts: boosts ?? this.boosts,
       canBoost: canBoost ?? this.canBoost,
       signatureCooked: signatureCooked ?? this.signatureCooked,
+      userSignature: userSignature ?? this.userSignature,
       policyAccepted: policyAccepted ?? this.policyAccepted,
       policyRevoked: policyRevoked ?? this.policyRevoked,
       policyCanAccept: policyCanAccept ?? this.policyCanAccept,
@@ -1924,6 +1955,7 @@ Map<String, dynamic> normalizeBookmarkListEntry(
         if (user.containsKey('avatar_template'))
           '_avatar_template': user['avatar_template'],
         if (user.containsKey('username')) '_username': user['username'],
+        if (user.containsKey('name')) '_name': user['name'],
       },
     ];
 

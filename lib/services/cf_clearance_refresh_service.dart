@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../constants.dart';
+import '../utils/frame_jank_monitor.dart';
+import '../utils/scroll_busy_signal.dart';
 import 'cf_challenge_logger.dart';
 import 'network/cookie/boundary_sync_service.dart';
 import 'network/cookie/cookie_jar_service.dart';
@@ -28,7 +30,14 @@ class CfClearanceRefreshService {
   static const String _cookieName = 'cf_clearance';
   static const int _maxConsecutiveFailures = 3;
   static const Duration _initialTimeout = Duration(seconds: 45);
-  static const Duration _cookiePollInterval = Duration(seconds: 45);
+
+  /// cookie 兜底轮询间隔。同步的**主路径是事件驱动**(load_stop /
+  /// turnstile_token / expired / error 信号即时触发 _syncAndCheckCookies),
+  /// 轮询只兜"信号丢失"的漏。每次轮询是一趟平台主线程往返
+  /// (CookieManager IPC),45s 一次 + health 每分钟又一次时,滚动中撞上
+  /// 的概率不低(vsyncOverhead 型掉帧的来源之一);拉宽到 2 分钟后
+  /// 8 分钟 stale 窗口内仍有 4 次检查机会,行为不变、平台线程流量 -75%。
+  static const Duration _cookiePollInterval = Duration(minutes: 2);
   static const Duration _healthCheckInterval = Duration(minutes: 1);
   static const Duration _staleRefreshWindow = Duration(minutes: 8);
   static const Duration _restartDelay = Duration(seconds: 5);
@@ -64,6 +73,11 @@ class CfClearanceRefreshService {
   Timer? _healthTimer;
   Timer? _delayedRestartTimer;
   Timer? _delayedStopTimer;
+
+  /// 滚动挂起状态机(仅 Android):500ms 检查一次滚动繁忙信号,
+  /// 见 [_updateScrollPause]
+  Timer? _scrollPauseTicker;
+  bool _webViewPausedForScroll = false;
 
   /// 获取当前缓存的 sitekey。
   String? get sitekey => _sitekey;
@@ -281,8 +295,11 @@ class CfClearanceRefreshService {
 
     try {
       CfChallengeLogger.log('[CfRefresh] 启动 Turnstile WebView');
+      // WebView 创建/加载在平台主线程执行重活,与掉帧时间轴对齐归因
+      FrameJankMonitor.logEvent('WEBVIEW', 'CfRefresh run() 开始');
 
       await webView.run();
+      FrameJankMonitor.logEvent('WEBVIEW', 'CfRefresh run() 完成');
       if (!_canHandleGeneration(gen)) return;
 
       final controller = webView.webViewController;
@@ -409,6 +426,60 @@ document.close();
     );
   }
 
+  /// stale_refresh 的轻量恢复:**原地重载** Turnstile 页面,不销毁重建
+  /// WebView 实例。
+  ///
+  /// 旧路径(dispose → priming 逐 cookie 三段式 → HeadlessInAppWebView.run
+  /// → loadData)每一步都是平台主线程的重活,滚动中撞上 = vsyncOverhead
+  /// 型掉帧(诊断实测 ov 50~97ms)。重载只有一次 loadData/loadUrl 调用,
+  /// 平台线程占用降一个量级;cookie 环境未变,无需重新 priming。
+  ///
+  /// 连续多次重载仍无 cookie 更新(说明不是页面卡死而是环境问题)才
+  /// 退回完全重建,由 [_recordFailure] 的既有退避逻辑接管。
+  static const int _maxReloadsBeforeRestart = 2;
+  int _staleReloads = 0;
+
+  Future<void> _reloadTurnstile(String reason, {required int gen}) async {
+    if (!_canHandleGeneration(gen)) return;
+    final controller = _webViewController;
+    final sitekey = _sitekey;
+    if (controller == null || sitekey == null || sitekey.isEmpty) {
+      _scheduleRestart(reason, gen: gen);
+      return;
+    }
+    if (_staleReloads >= _maxReloadsBeforeRestart) {
+      CfChallengeLogger.log(
+        '[CfRefresh] 原地重载 $_staleReloads 次仍无更新,退回完全重建',
+      );
+      _staleReloads = 0;
+      _scheduleRestart(reason, gen: gen);
+      return;
+    }
+    _staleReloads++;
+    FrameJankMonitor.logEvent('WEBVIEW', 'CfRefresh reload($reason)');
+
+    try {
+      final html = _buildTurnstileHtml(sitekey);
+      if (io.Platform.isWindows) {
+        await _writeTurnstileHtml(controller, html);
+      } else {
+        await controller.loadData(
+          data: html,
+          baseUrl: WebUri(AppConstants.baseUrl),
+          mimeType: 'text/html',
+          encoding: 'utf-8',
+        );
+      }
+      // 重载视为一次活动,把 stale 窗口锚点前移,避免下个 health tick
+      // 立即再次触发
+      _lastCookieAdvanceAt = DateTime.now();
+    } catch (e) {
+      CfChallengeLogger.log('[CfRefresh] 原地重载失败,退回完全重建: $e');
+      _staleReloads = 0;
+      _scheduleRestart(reason, gen: gen);
+    }
+  }
+
   Future<void> _disposeWebView({required String reason}) async {
     if (_isDisposing) {
       CfChallengeLogger.log('[CfRefresh] 忽略重复 dispose 请求: $reason');
@@ -451,6 +522,7 @@ document.close();
     } finally {
       _isDisposing = false;
     }
+    FrameJankMonitor.logEvent('WEBVIEW', 'CfRefresh dispose: $reason');
 
     CfChallengeLogger.log(
       '[CfRefresh] disposing end: reason=$reason, shouldRun=$_shouldBeRunning',
@@ -481,6 +553,9 @@ document.close();
         _cookiePollTimer?.cancel();
         return;
       }
+      // 滚动中让路:cookie 同步是一趟平台主线程 IPC,与 vsync 分发
+      // 同线程;这是兜底轮询,顺延一轮无影响
+      if (ScrollBusySignal.isBusy) return;
       unawaited(_syncAndCheckCookies('poll', gen));
     });
 
@@ -489,23 +564,74 @@ document.close();
         _healthTimer?.cancel();
         return;
       }
+      // 滚动中让路(同 poll:stale 判定顺延一轮无影响)
+      if (ScrollBusySignal.isBusy) return;
+      // 平时不做 WebView cookie 同步(那是一趟平台主线程 IPC,主路径
+      // 已由 JS 信号事件驱动 + 2min 兜底轮询覆盖);只在逼近 stale 窗口
+      // 时同步一次拿最新状态,确认真 stale 才重载。
+      final anchor = _lastCookieAdvanceAt ?? _runningStartedAt;
+      if (anchor == null) return;
+      var idle = DateTime.now().difference(anchor);
+      if (idle < _staleRefreshWindow) return;
+
       await _syncAndCheckCookies('health', gen);
       if (!_canHandleGeneration(gen)) return;
 
-      final anchor = _lastCookieAdvanceAt ?? _runningStartedAt;
-      if (anchor == null) return;
-      final idle = DateTime.now().difference(anchor);
+      final freshAnchor = _lastCookieAdvanceAt ?? _runningStartedAt;
+      if (freshAnchor == null) return;
+      idle = DateTime.now().difference(freshAnchor);
       if (idle >= _staleRefreshWindow) {
         final lastSignalAgo = _lastSignalAt == null
             ? 'never'
             : '${DateTime.now().difference(_lastSignalAt!).inSeconds}s';
         CfChallengeLogger.log(
-          '[CfRefresh] 长时间未观察到 cf_clearance 更新，重建 WebView '
+          '[CfRefresh] 长时间未观察到 cf_clearance 更新，原地重载 Turnstile '
           '(idle=${idle.inSeconds}s, lastSignalAgo=$lastSignalAgo)',
         );
-        _scheduleRestart('stale_refresh', gen: gen);
+        unawaited(_reloadTurnstile('stale_refresh', gen: gen));
       }
     });
+
+    // 滚动窗口内把 headless WebView 挂起(Android onPause:暂停 JS 定时
+    // 器与渲染,不销毁实例):Turnstile 是活网页,常驻 JS 把平台主线程
+    // 烧到 60%+ 单核(生产 CPU 采样),而 vsync 分发/触摸事件与其同
+    // 线程。滚动繁忙即挂起、静默 ~1s 后恢复,JS 信号与刷新逻辑 resume
+    // 后自然补上。初始 Turnstile 运行期(_initialTimer 未清)只恢复不
+    // 挂起,避免把首次验证拖到超时误判重建。
+    if (io.Platform.isAndroid) {
+      _scrollPauseTicker = Timer.periodic(
+        const Duration(milliseconds: 500),
+        (_) {
+          if (!_canHandleGeneration(gen)) {
+            _scrollPauseTicker?.cancel();
+            return;
+          }
+          unawaited(_updateScrollPause());
+        },
+      );
+    }
+  }
+
+  /// 滚动繁忙 ↔ 静默的 WebView 挂起切换(仅 Android,由
+  /// [_scrollPauseTicker] 驱动)。pause/resume 是单实例 onPause/onResume,
+  /// 一次轻量平台调用;失败时复位标记,避免卡死在挂起态。
+  Future<void> _updateScrollPause() async {
+    final controller = _webViewController;
+    if (controller == null) return;
+    final wantPause = ScrollBusySignal.isBusy && _initialTimer == null;
+    if (wantPause == _webViewPausedForScroll) return;
+    try {
+      if (wantPause) {
+        _webViewPausedForScroll = true;
+        await controller.pause();
+      } else {
+        _webViewPausedForScroll = false;
+        await controller.resume();
+      }
+    } catch (e) {
+      _webViewPausedForScroll = false;
+      CfChallengeLogger.log('[CfRefresh] 滚动挂起/恢复失败: $e');
+    }
   }
 
   Future<bool> _syncAndCheckCookies(String reason, int gen) async {
@@ -537,6 +663,7 @@ document.close();
       if (advanced) {
         _cancelInitialTimer();
         _consecutiveFailures = 0;
+        _staleReloads = 0;
         CfChallengeLogger.log(
           '[CfRefresh] cf_clearance 已更新: reason=$reason '
           'expires=${snapshot.expiresAt?.toIso8601String() ?? '-'}',
@@ -691,6 +818,10 @@ document.close();
     _cookiePollTimer = null;
     _healthTimer?.cancel();
     _healthTimer = null;
+    _scrollPauseTicker?.cancel();
+    _scrollPauseTicker = null;
+    // 旧实例的挂起态随销毁消失;新实例从 resumed 起步
+    _webViewPausedForScroll = false;
   }
 
   void _cancelDelayedTimers() {

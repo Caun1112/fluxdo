@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../navigation/nav_action_bus.dart';
 import '../services/network/request_scheduler_config.dart';
 import '../services/cf_challenge_service.dart';
+import '../utils/blocked_user_filter.dart';
 import 'theme_provider.dart';
 
 /// 嵌套视图连接线样式
@@ -123,12 +124,19 @@ class AppPreferences {
   /// 话题关键词过滤：是否启用完整词匹配（仅影响英文/数字等 word-char 关键词）
   final bool topicFilterWholeWord;
 
+  /// 本地内容屏蔽用户名列表。只影响本客户端的展示，不会同步到 Discourse。
+  final List<String> blockedUsernames;
+
   /// 话题关键词过滤的归一化形式（lowercase），匹配时使用
   late final List<String> normalizedFilterKeywords = List.unmodifiable(
     topicFilterKeywords
         .map((keyword) => keyword.trim().toLowerCase())
         .where((keyword) => keyword.isNotEmpty),
   );
+
+  /// 本地内容屏蔽用户名的归一化集合，匹配时使用。
+  late final Set<String> normalizedBlockedUsernames =
+      BlockedUserFilter.normalizedUsernames(blockedUsernames);
 
   /// 崩溃日志上报（仅 Android）
   final bool crashlytics;
@@ -150,6 +158,9 @@ class AppPreferences {
 
   /// AI 助手左滑入口（PageView 模式）
   final bool aiSwipeEntry;
+
+  /// 富文本编辑器(实验性,自研 WYSIWYG composer)
+  final bool useRichComposer;
 
   /// 发帖前 AI 审核
   final bool aiPostReviewEnabled;
@@ -239,6 +250,7 @@ class AppPreferences {
     required this.clipboardTopicLinkDetection,
     required this.topicFilterKeywords,
     this.topicFilterWholeWord = false,
+    this.blockedUsernames = const [],
     required this.crashlytics,
     required this.portraitLock,
     required this.hideBarOnScroll,
@@ -246,6 +258,7 @@ class AppPreferences {
     required this.autoCfChallenge,
     required this.expandRelatedLinks,
     required this.aiSwipeEntry,
+    this.useRichComposer = false,
     this.aiPostReviewEnabled = false,
     this.aiPostReviewModelKey,
     this.hcaptchaCreateEndpoint,
@@ -288,6 +301,7 @@ class AppPreferences {
     bool? clipboardTopicLinkDetection,
     List<String>? topicFilterKeywords,
     bool? topicFilterWholeWord,
+    List<String>? blockedUsernames,
     bool? crashlytics,
     bool? portraitLock,
     bool? hideBarOnScroll,
@@ -295,6 +309,7 @@ class AppPreferences {
     bool? autoCfChallenge,
     bool? expandRelatedLinks,
     bool? aiSwipeEntry,
+    bool? useRichComposer,
     bool? aiPostReviewEnabled,
     Object? aiPostReviewModelKey = _unset,
     Object? hcaptchaCreateEndpoint = _unset,
@@ -339,6 +354,7 @@ class AppPreferences {
           clipboardTopicLinkDetection ?? this.clipboardTopicLinkDetection,
       topicFilterKeywords: topicFilterKeywords ?? this.topicFilterKeywords,
       topicFilterWholeWord: topicFilterWholeWord ?? this.topicFilterWholeWord,
+      blockedUsernames: blockedUsernames ?? this.blockedUsernames,
       crashlytics: crashlytics ?? this.crashlytics,
       portraitLock: portraitLock ?? this.portraitLock,
       hideBarOnScroll: hideBarOnScroll ?? this.hideBarOnScroll,
@@ -346,6 +362,7 @@ class AppPreferences {
       autoCfChallenge: autoCfChallenge ?? this.autoCfChallenge,
       expandRelatedLinks: expandRelatedLinks ?? this.expandRelatedLinks,
       aiSwipeEntry: aiSwipeEntry ?? this.aiSwipeEntry,
+      useRichComposer: useRichComposer ?? this.useRichComposer,
       aiPostReviewEnabled: aiPostReviewEnabled ?? this.aiPostReviewEnabled,
       aiPostReviewModelKey: identical(aiPostReviewModelKey, _unset)
           ? this.aiPostReviewModelKey
@@ -407,6 +424,7 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
       'pref_clipboard_topic_link_detection';
   static const String _topicFilterKeywordsKey = 'pref_topic_filter_keywords';
   static const String _topicFilterWholeWordKey = 'pref_topic_filter_whole_word';
+  static const String _blockedUsernamesKey = 'pref_blocked_usernames';
   static const String _crashlyticsKey = 'pref_crashlytics';
   static const String _portraitLockKey = 'pref_portrait_lock';
   static const String _hideBarOnScrollKey = 'pref_hide_bar_on_scroll';
@@ -414,6 +432,7 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   static const String _autoCfChallengeKey = 'pref_auto_cf_challenge';
   static const String _expandRelatedLinksKey = 'pref_expand_related_links';
   static const String _aiSwipeEntryKey = 'pref_ai_swipe_entry';
+  static const String _useRichComposerKey = 'pref_use_rich_composer';
   static const String _aiPostReviewEnabledKey = 'pref_ai_post_review_enabled';
   static const String _aiPostReviewModelPrefKey = 'pref_ai_post_review_model';
   static const String _hcaptchaCreateEndpointKey =
@@ -477,6 +496,8 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
               _prefs.getStringList(_topicFilterKeywordsKey) ?? const [],
           topicFilterWholeWord:
               _prefs.getBool(_topicFilterWholeWordKey) ?? false,
+          blockedUsernames:
+              _prefs.getStringList(_blockedUsernamesKey) ?? const [],
           crashlytics: _prefs.getBool(_crashlyticsKey) ?? true,
           portraitLock: _prefs.getBool(_portraitLockKey) ?? false,
           hideBarOnScroll: _prefs.getBool(_hideBarOnScrollKey) ?? true,
@@ -484,6 +505,7 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
           autoCfChallenge: _prefs.getBool(_autoCfChallengeKey) ?? true,
           expandRelatedLinks: _prefs.getBool(_expandRelatedLinksKey) ?? false,
           aiSwipeEntry: _prefs.getBool(_aiSwipeEntryKey) ?? false,
+          useRichComposer: _prefs.getBool(_useRichComposerKey) ?? false,
           aiPostReviewEnabled: _prefs.getBool(_aiPostReviewEnabledKey) ?? false,
           aiPostReviewModelKey: _prefs.getString(_aiPostReviewModelPrefKey),
           hcaptchaCreateEndpoint: _prefs.getString(_hcaptchaCreateEndpointKey),
@@ -634,6 +656,17 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
     await _prefs.setBool(_topicFilterWholeWordKey, enabled);
   }
 
+  Future<void> setBlockedUsernames(List<String> usernames) async {
+    final sanitized = BlockedUserFilter.sanitizeUsernames(usernames);
+    final current = state.blockedUsernames;
+    if (sanitized.length == current.length &&
+        const ListEquality<String>().equals(sanitized, current)) {
+      return;
+    }
+    state = state.copyWith(blockedUsernames: sanitized);
+    await _prefs.setStringList(_blockedUsernamesKey, sanitized);
+  }
+
   Future<void> setCrashlytics(bool enabled) async {
     state = state.copyWith(crashlytics: enabled);
     await _prefs.setBool(_crashlyticsKey, enabled);
@@ -682,6 +715,11 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   Future<void> setAiSwipeEntry(bool enabled) async {
     state = state.copyWith(aiSwipeEntry: enabled);
     await _prefs.setBool(_aiSwipeEntryKey, enabled);
+  }
+
+  Future<void> setUseRichComposer(bool enabled) async {
+    state = state.copyWith(useRichComposer: enabled);
+    await _prefs.setBool(_useRichComposerKey, enabled);
   }
 
   Future<void> setAiPostReviewEnabled(bool enabled) async {

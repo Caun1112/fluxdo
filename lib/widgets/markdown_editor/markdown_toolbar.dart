@@ -16,7 +16,10 @@ import '../../services/app_error_handler.dart';
 import '../../services/discourse/discourse_service.dart';
 import '../../services/toast_service.dart';
 import '../common/fading_edge_scroll_view.dart';
+import '../content/discourse_html_content/image_utils.dart';
 import 'editor_tools.dart';
+import 'media_upload_helper.dart';
+import 'voice_recorder_sheet.dart';
 import 'image_upload_dialog.dart';
 import 'link_insert_dialog.dart';
 import 'template_insert_dialog.dart';
@@ -32,6 +35,7 @@ class MarkdownToolbar extends StatefulWidget {
   /// 内容焦点节点（可选，用于恢复焦点）
   final FocusNode? focusNode;
 
+
   /// 是否显示预览按钮
   final bool showPreviewButton;
 
@@ -40,6 +44,9 @@ class MarkdownToolbar extends StatefulWidget {
 
   /// 预览切换回调
   final VoidCallback? onTogglePreview;
+
+  /// 源码 → 富文本切换(null = 不显示按钮)。
+  final VoidCallback? onSwitchToRich;
 
   /// 混排优化按钮回调
   final VoidCallback? onApplyPangu;
@@ -71,6 +78,7 @@ class MarkdownToolbar extends StatefulWidget {
     this.showPreviewButton = true,
     this.isPreview = false,
     this.onTogglePreview,
+    this.onSwitchToRich,
     this.onApplyPangu,
     this.showPanguButton = false,
     this.onToggleEmoji,
@@ -756,6 +764,15 @@ class MarkdownToolbarState extends State<MarkdownToolbar> {
   }
 
   /// 从文件路径上传图片（公开方法，供外部调用）
+  /// 上传成功后把 short_url → 完整 url 预置进解析缓存，
+  /// 编辑器预览里的 upload:// 新图不用再发 lookup-urls 请求
+  void _seedUploadCache(UploadResult uploadResult) {
+    final url = uploadResult.url;
+    if (url != null) {
+      DiscourseImageUtils.seedUploadUrl(uploadResult.shortUrl, url);
+    }
+  }
+
   Future<void> uploadImageFromPath({required String imagePath, required String imageName}) async {
     try {
       // 显示确认弹框
@@ -772,6 +789,7 @@ class MarkdownToolbarState extends State<MarkdownToolbar> {
       try {
         final service = DiscourseService();
         final uploadResult = await service.uploadImage(result.path);
+        _seedUploadCache(uploadResult);
 
         if (!mounted) return;
         // 使用 Discourse 格式：![alt|widthxheight](url)
@@ -833,6 +851,7 @@ class MarkdownToolbarState extends State<MarkdownToolbar> {
             setState(() => _uploadProgress = '${i + 1}/${results.length}');
           }
           final uploadResult = await service.uploadImage(result.path);
+          _seedUploadCache(uploadResult);
           markdowns.add(uploadResult.toMarkdown(alt: result.originalName));
         }
 
@@ -880,6 +899,7 @@ class MarkdownToolbarState extends State<MarkdownToolbar> {
       try {
         final service = DiscourseService();
         final uploadResult = await service.uploadFile(file.path!);
+        _seedUploadCache(uploadResult);
 
         if (!mounted) return;
 
@@ -899,6 +919,58 @@ class MarkdownToolbarState extends State<MarkdownToolbar> {
       // 网络错误已由 ErrorInterceptor 处理
     } catch (e, s) {
       AppErrorHandler.handleUnexpected(e, s);
+    }
+  }
+
+  /// 音/视频改名上传(.xz 绕扩展名白名单,4MB 上限)→ 插 HTML 标签。
+  Future<void> pickAndUploadMedia({required bool isAudio}) async {
+    final tag = await pickAndUploadMediaTag(context, isAudio: isAudio);
+    if (tag == null || !mounted) return;
+    final selection = widget.controller.selection;
+    final text = widget.controller.text;
+    final needsLeadingNewline = selection.isValid &&
+        selection.start > 0 &&
+        text[selection.start - 1] != '\n';
+    final prefix = needsLeadingNewline ? '\n' : '';
+    insertText('$prefix$tag\n');
+  }
+
+  /// 插入块级模板(表格/公式/分隔线/details):独占行语义,光标前
+  /// 非行首先补换行(与媒体标签插入同款;模板文本与富 composer 的
+  /// 「+」插入菜单一致)。
+  void insertBlockSnippet(String snippet) {
+    final selection = widget.controller.selection;
+    final text = widget.controller.text;
+    final needsLeadingNewline = selection.isValid &&
+        selection.start > 0 &&
+        text[selection.start - 1] != '\n';
+    final prefix = needsLeadingNewline ? '\n' : '';
+    insertText('$prefix$snippet\n');
+  }
+
+  /// 语音消息:录音面板 → 上传([wrap=voice] 语音条标签)→ 插入。
+  Future<void> recordAndInsertVoice() async {
+    final path = await showVoiceRecorderSheet(context);
+    if (path == null || !mounted) return;
+    setState(() => _uploadingCount++);
+    try {
+      final tag = await uploadMediaFileAsTag(
+        context,
+        path: path,
+        name: path.split('/').last,
+        isAudio: true,
+        voice: true,
+      );
+      if (tag == null || !mounted) return;
+      final selection = widget.controller.selection;
+      final text = widget.controller.text;
+      final needsLeadingNewline = selection.isValid &&
+          selection.start > 0 &&
+          text[selection.start - 1] != '\n';
+      final prefix = needsLeadingNewline ? '\n' : '';
+      insertText('$prefix$tag\n');
+    } finally {
+      if (mounted) setState(() => _uploadingCount--);
     }
   }
 
@@ -1031,6 +1103,41 @@ class MarkdownToolbarState extends State<MarkdownToolbar> {
                         tooltip: widget.isPreview
                             ? S.current.common_edit
                             : S.current.common_preview,
+                      ),
+                    // 源码 → 富文本(与 RichComposer 的「MD」按钮互为
+                    // 往返;富文本开关未开时宿主不传,不显示)
+                    if (widget.onSwitchToRich != null)
+                      Tooltip(
+                        message: '切换到富文本模式',
+                        child: InkWell(
+                          onTap: widget.onSwitchToRich,
+                          borderRadius: BorderRadius.circular(18),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 7),
+                            child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Symbols.wysiwyg_rounded,
+                                    size: 18,
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                  const SizedBox(width: 3),
+                                  Text(
+                                    'Aa',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      height: 1.0,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 0.3,
+                                      color:
+                                          theme.colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ]),
+                          ),
+                        ),
                       ),
                     if (isMobile)
                       IconButton(
