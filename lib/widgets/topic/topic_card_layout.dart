@@ -6,8 +6,10 @@ import 'package:flutter/material.dart';
 import '../../models/category.dart';
 import '../../models/search_result.dart';
 import '../../models/topic.dart';
+import '../../models/topic_card_style.dart';
 import '../../utils/color_utils.dart';
 import '../../utils/number_utils.dart';
+import '../../utils/relative_time_clock.dart';
 import '../../utils/time_utils.dart';
 
 /// 话题自绘卡的排版产物:一张卡全部文本的 [ui.Paragraph] 成品 + 几何。
@@ -84,6 +86,11 @@ class TopicCardLayout {
   Color cardColor = Colors.transparent;
   String? avatarUrl;
 
+  /// 动画头像原件 URL(gif 全文件),仅动态头像开关开启且用户有动图时
+  /// 非空。画布不消费它 —— 由 PaintedTopicCard 挂播放 overlay;
+  /// [avatarUrl] 恒为静态模板小图,保证首帧秒出
+  String? animatedAvatarUrl;
+
   /// 无障碍标签(自绘卡不产生语义子树,整卡一条)
   String semanticsLabel = '';
 
@@ -96,6 +103,10 @@ class TopicCardLayout {
   double layoutWidth = -1;
   void Function(double width)? _doLayout;
 
+  /// 原地重排代数:每次 [refreshTime] 原地重排 +1。渲染对象据此感知
+  /// "同一 layout 实例内容变了"(identical 判不出),触发重布局。
+  int revision = 0;
+
   /// 布局期宽度纠正:与当前排版宽差 >0.5px 才重排(重排 ≈1.5~2.5ms,
   /// 只发生在首次拿到真实宽/窗口改宽的那一帧)。
   void ensureWidth(double width) {
@@ -105,22 +116,48 @@ class TopicCardLayout {
     relayout(width);
   }
 
+  /// 分钟心跳的在屏原地刷新:重跑排版闭包(闭包体内重新求值
+  /// formatRelativeTime,时间串随之更新)。仅由在屏卡的心跳订阅调用
+  /// —— 离屏缓存不动,靠 stamp 里的分钟代在下次 obtain 时惰性换新。
+  void refreshTime() {
+    final relayout = _doLayout;
+    if (relayout == null || layoutWidth <= 0) return;
+    relayout(layoutWidth);
+    revision++;
+  }
+
   static final Map<String, TopicCardLayout> _cache = {};
   static const int cacheCap = 500;
 
-  static TopicCardLayout _slot(String identity) {
-    final hit = _cache[identity];
-    if (hit != null) return hit;
-    if (_cache.length >= cacheCap) {
+  /// 相对时间的分钟代:全局心跳每跳一次 +1,进 stamp —— 含时间的
+  /// 排版跨分钟自动失效,下次 build 惰性重排(消灭"自绘卡时间是
+  /// 排版快照不自刷"与 widget 路径的行为差异)。渲染对象侧由
+  /// PaintedTopicCard 订阅心跳触发 rebuild,失效与重建同源同帧。
+  static int _minuteEpoch = 0;
+  static bool _clockHooked = false;
+
+  static int _currentMinuteEpoch() {
+    if (!_clockHooked) {
+      _clockHooked = true;
+      RelativeTimeClock.instance.addListener(() => _minuteEpoch++);
+    }
+    return _minuteEpoch;
+  }
+
+  /// 存入缓存(替换旧实例)并按需 LRU。**内容变化必产出新实例**:
+  /// PaintedTopicCard 的渲染对象用 identical 判断是否重绘,若复用同一
+  /// 实例做原地重排,identical 恒 true → 已读等状态更新画不出来
+  /// (需滑出销毁再滑回新建才生效)。让实例 identity == 内容 identity,
+  /// 命中缓存=真没变(同实例,不重绘),stamp 变=新实例(重绘)。
+  static void _put(String identity, TopicCardLayout layout) {
+    if (!_cache.containsKey(identity) && _cache.length >= cacheCap) {
       // 简易 LRU:满了清一半(重排成本低,不值得维护链表)
       final keys = _cache.keys.take(_cache.length ~/ 2).toList();
       for (final k in keys) {
         _cache.remove(k);
       }
     }
-    final layout = TopicCardLayout._(identity);
     _cache[identity] = layout;
-    return layout;
   }
 
   /// 环境级失效(主题/字号变化时可由页面调用;逐卡 stamp 也会兜住)
@@ -141,7 +178,13 @@ class TopicCardLayout {
     String? bandName,
     String? bandReminder,
     bool bandExpired = false,
+    TopicCardStyle? style,
   }) {
+    // 私信卡不受话题卡自定义样式影响:强制回默认。列表调用方不传
+    // style 时直读全局快照(预览页显式传草稿值)
+    final effStyle = messageStyle
+        ? TopicCardStyle.defaults
+        : (style ?? TopicCardStyleScope.current);
     final stamp = (
       identityHashCode(topic),
       identityHashCode(theme),
@@ -149,10 +192,13 @@ class TopicCardLayout {
       messageStyle,
       bandExpired,
       identityHashCode(category),
+      _currentMinuteEpoch(),
+      effStyle, // 值语义 ==:改样式设置即重排
     );
-    final layout = _slot(identity);
-    if (layout._stamp == stamp) return layout;
-    layout._stamp = stamp;
+    final cached = _cache[identity];
+    if (cached != null && cached._stamp == stamp) return cached;
+    final layout = TopicCardLayout._(identity).._stamp = stamp;
+    _put(identity, layout);
 
     final scheme = theme.colorScheme;
     final isUnread = topic.unseen || topic.unread > 0;
@@ -207,10 +253,18 @@ class TopicCardLayout {
       bandName: bandName,
       bandReminder: bandReminder,
       bandExpired: bandExpired,
+      // 画布首帧恒用静态模板小图(几 KB 秒出);gif 原件(几百 KB~MB)
+      // 只在开关开启时单独带出,供播放 overlay 消费 —— 把原件喂进
+      // 静态首帧管线会整卡等一次大文件下载("动图用户头像加载慢")
       avatarUrlValue: topic.posters.isNotEmpty
           ? topic.posters.first.user?.getAvatarUrl(size: 128)
           : null,
+      animatedAvatarUrlValue:
+          effStyle.animatedAvatar && topic.posters.isNotEmpty
+          ? topic.posters.first.user?.animatedAvatarUrl
+          : null,
       titleRightChips: const [],
+      style: effStyle,
     );
     layout._doLayout!(width);
     return layout;
@@ -227,14 +281,15 @@ class TopicCardLayout {
   }) {
     final stamp = (
       identityHashCode(post),
-      width,
       identityHashCode(theme),
       statsAvailableWidth,
       identityHashCode(category),
+      _currentMinuteEpoch(),
     );
-    final layout = _slot(identity);
-    if (layout._stamp == stamp) return layout;
-    layout._stamp = stamp;
+    final cached = _cache[identity];
+    if (cached != null && cached._stamp == stamp) return cached;
+    final layout = TopicCardLayout._(identity).._stamp = stamp;
+    _put(identity, layout);
 
     final scheme = theme.colorScheme;
     final topic = post.topic;
@@ -288,6 +343,7 @@ class TopicCardLayout {
         if (post.isAiGenerated) (_ChipKind.aiIcon, ''),
         if (post.postNumber > 1) (_ChipKind.badge, '#${post.postNumber}'),
       ],
+      style: TopicCardStyle.defaults, // 搜索卡不受话题卡样式影响
     );
     layout._doLayout!(width);
     return layout;
@@ -402,7 +458,9 @@ class TopicCardLayout {
     required String? bandReminder,
     required bool bandExpired,
     required String? avatarUrlValue,
+    String? animatedAvatarUrlValue,
     required List<(_ChipKind, String)> titleRightChips,
+    required TopicCardStyle style,
   }) {
     final scheme = theme.colorScheme;
     final baseText = theme.textTheme.bodyMedium ?? const TextStyle();
@@ -410,6 +468,14 @@ class TopicCardLayout {
     const hPad = 12.0;
     final innerWidth = width - hPad * 2;
     layoutWidth = width;
+
+    // 头像布局:inline = 头像在元信息行内(32);column = 头像独占
+    // 左列(40,与私信卡一致),标题/摘要/元信息统一从 contentX 起排
+    final avatarCol =
+        !messageStyle && style.avatarLayout == TopicCardAvatarLayout.column;
+    const colAvatarD = 40.0;
+    final contentX = avatarCol ? hPad + colAvatarD + 10 : hPad;
+    final contentW = avatarCol ? innerWidth - colAvatarD - 10 : innerWidth;
 
     cardColor = theme.cardTheme.color ?? scheme.surface;
     extraFills.clear();
@@ -482,15 +548,23 @@ class TopicCardLayout {
     }
 
     // ── 统计簇(catTags 行右侧;先排才知道 catTags 可用宽)────────
-    _layoutStats(
-      theme,
-      statsAvailableWidth,
-      isFullyRead,
-      views: views,
-      likeCount: likeCount,
-      replies: replies,
-      heatColor: heatColor,
-    );
+    // 私信卡无统计簇:必须显式置空 —— statsOffset 只在普通卡分支
+    // 赋值,私信分支不碰它;若 stats 非 null 会以默认 Offset.zero
+    // 画在卡片左上角(自绘化时漏守卫的潜伏 bug)
+    if (messageStyle) {
+      stats = null;
+    } else {
+      _layoutStats(
+        theme,
+        statsAvailableWidth,
+        isFullyRead,
+        views: views,
+        likeCount: likeCount,
+        replies: replies,
+        heatColor: heatColor,
+        style: style,
+      );
+    }
 
     // ── 标题右侧 chips(搜索卡:AI 图标 / #楼层)────────────────
     var titleRightW = 0.0;
@@ -523,7 +597,8 @@ class TopicCardLayout {
     final subjectColor = isFullyRead
         ? scheme.onSurfaceVariant.withValues(alpha: 0.75)
         : scheme.onSurface.withValues(alpha: 0.9);
-    final titleFontSize = messageStyle ? (baseText.fontSize ?? 14) : 15.0;
+    final titleFontSize =
+        messageStyle ? (baseText.fontSize ?? 14) : style.titleFontSize;
     final titleWeight = messageStyle
         ? (isFullyRead ? FontWeight.w400 : FontWeight.w500)
         : normalTitleWeight;
@@ -571,7 +646,7 @@ class TopicCardLayout {
     // 普通卡标题右侧要让出未读槽位宽;私信卡主题行满宽
     final titleAvailW = messageStyle
         ? innerWidth - 50 // 头像 40 + 间距 10
-        : innerWidth - (unreadW > 0 ? unreadW : 0) - titleRightW;
+        : contentW - (unreadW > 0 ? unreadW : 0) - titleRightW;
     title = tb.build()
       ..layout(ui.ParagraphConstraints(width: titleAvailW.clamp(40, width)));
     final phBoxes = title!.getBoxesForPlaceholders();
@@ -618,7 +693,7 @@ class TopicCardLayout {
           ex.addText(text);
         }
       }
-      final exW = messageStyle ? innerWidth - 50 : innerWidth;
+      final exW = messageStyle ? innerWidth - 50 : contentW;
       excerpt = ex.build()..layout(ui.ParagraphConstraints(width: exW));
     }
 
@@ -643,6 +718,7 @@ class TopicCardLayout {
         color: timeHighlight ? scheme.primary : metaColor,
       ))
       ..addText(timeStr);
+    // 时间是卡片骨架字段,恒定显示
     time = tmb.build()..layout(const ui.ParagraphConstraints(width: 200));
 
     final ab = ui.ParagraphBuilder(
@@ -660,28 +736,30 @@ class TopicCardLayout {
       ))
       ..addText(authorName);
 
-    // ── 分类 + 标签行(私信卡无此行)───────────────────────────
+    // ── 分类 + 标签行(私信卡无此行;字段开关各自过滤)──────────
     catTags = null;
     categoryDotColor = null;
-    if (!messageStyle && (category != null || tags.isNotEmpty)) {
+    final effCategory = category; // 分类是骨架字段,恒定显示
+    final effTags = style.showTags ? tags : const <Tag>[];
+    if (!messageStyle && (effCategory != null || effTags.isNotEmpty)) {
       final dimF = isFullyRead ? 0.55 : 1.0;
       final lineColor = metaColor.withValues(alpha: metaColor.a * dimF);
       final b = ui.ParagraphBuilder(
         _pStyle(fontSize: labelSmall.fontSize ?? 11, maxLines: 1),
       )..pushStyle(_tStyle(labelSmall, color: lineColor));
       var first = true;
-      if (category != null) {
+      if (effCategory != null) {
         b.pushStyle(ui.TextStyle(fontWeight: FontWeight.w500));
-        b.addText(category.name);
+        b.addText(effCategory.name);
         b.pop();
         first = false;
         var dot = ColorUtils.readableOn(
-          _parseCategoryColor(category.color),
+          _parseCategoryColor(effCategory.color),
           theme.brightness,
         );
         categoryDotColor = dot.withValues(alpha: dot.a * dimF);
       }
-      for (final tag in tags) {
+      for (final tag in effTags) {
         if (!first) b.addText('   ');
         first = false;
         b.pushStyle(
@@ -743,10 +821,10 @@ class TopicCardLayout {
       );
       cardHeight = bandHeight + vPad + rowH + vPad + 8;
     } else {
-      // 普通卡:标题(+右侧未读/chips)→ 摘要 → 头像行
-      titleOffset = Offset(hPad, y);
+      // 普通卡:标题(+右侧未读/chips)→ 摘要 → 元信息行
+      titleOffset = Offset(contentX, y);
       // 未读槽位钉标题行右上
-      var rx = width - hPad;
+      final rx = width - hPad;
       if (unreadW > 0) {
         _placeUnread(
           unreadBadgeP,
@@ -785,36 +863,73 @@ class TopicCardLayout {
       y += title!.height;
       if (excerpt != null) {
         y += 4;
-        excerptOffset = Offset(hPad, y);
+        excerptOffset = Offset(contentX, y);
         y += excerpt!.height;
       }
-      y += 8;
-      // 头像行:头像 32,右侧两行(署名+时间 / 分类标签+统计)
+      // 元信息行:inline = 头像 32 在行内;column = 头像已独占左列,
+      // 元信息不再让头像占位。
+      // 动态布局:author 与 catTags 同为左侧信息块,双双在场才分两行
+      // (署名+时间 / 分类标签+统计);任一缺席(字段开关或数据缺失)
+      // 则剩余字段合并单行 [左块 … 统计 时间],行随内容收缩
       const avatarD = 32.0;
-      final rightX = hPad + avatarD + 8;
-      final metaWidth = innerWidth - avatarD - 8;
-      author = ab.build()
-        ..layout(ui.ParagraphConstraints(
-          width: (metaWidth - time!.longestLine - 8).clamp(20, metaWidth),
-        ));
+      final rightX = avatarCol ? contentX : hPad + avatarD + 8;
+      final metaWidth = avatarCol ? contentW : innerWidth - avatarD - 8;
+      author = (style.showAuthor && authorName.isNotEmpty) ? ab.build() : null;
+      final twoRows = author != null && catTags != null;
+      final timeW = time == null ? 0.0 : time!.longestLine + 8;
       final statsW = stats == null ? 0.0 : stats!.longestLine + 8;
       final dotSpace = categoryDotColor != null ? 12.0 : 0.0;
-      catTags?.layout(ui.ParagraphConstraints(
-        width: (metaWidth - dotSpace - statsW).clamp(20, metaWidth),
-      ));
-      final secondH = catTags?.height ?? stats?.height ?? 0;
+      final double firstH;
+      final double secondH;
+      if (twoRows) {
+        author!.layout(ui.ParagraphConstraints(
+          width: (metaWidth - timeW).clamp(20, metaWidth),
+        ));
+        catTags!.layout(ui.ParagraphConstraints(
+          width: (metaWidth - dotSpace - statsW).clamp(20, metaWidth),
+        ));
+        firstH = author!.height;
+        secondH = catTags!.height;
+      } else {
+        // 单行:右侧簇 [统计 10 时间],整簇与左块间留 8
+        var rightReserve =
+            (stats?.longestLine ?? 0.0) + (time?.longestLine ?? 0.0);
+        if (stats != null && time != null) rightReserve += 10;
+        if (rightReserve > 0) rightReserve += 8;
+        final leftPara = author ?? catTags;
+        leftPara?.layout(ui.ParagraphConstraints(
+          width: (metaWidth - dotSpace - rightReserve).clamp(20, metaWidth),
+        ));
+        firstH = leftPara?.height ?? time?.height ?? stats?.height ?? 0.0;
+        secondH = 0.0;
+      }
       final rightBlockH =
-          author!.height + (secondH > 0 ? 2 + secondH : 0.0);
-      final rowH = rightBlockH > avatarD ? rightBlockH : avatarD;
-      avatarRect = Rect.fromLTWH(hPad, y + (rowH - avatarD) / 2, avatarD, avatarD);
-      final rowTop = y + (rowH - rightBlockH) / 2;
-      authorOffset = Offset(rightX, rowTop);
-      timeOffset = Offset(
-        width - hPad - time!.longestLine,
-        rowTop + (author!.height - time!.height) / 2,
-      );
-      final secondLineY = rowTop + author!.height + 2;
-      if (catTags != null) {
+          firstH + (firstH > 0 && secondH > 0 ? 2 : 0.0) + secondH;
+      final hasMetaRow = avatarCol ? rightBlockH > 0 : true;
+      if (hasMetaRow) y += 8;
+      final double rowTop;
+      if (avatarCol) {
+        // 头像独占左列:顶对齐标题首行(复刻私信卡观感)
+        avatarRect =
+            Rect.fromLTWH(hPad, bandHeight + vPad, colAvatarD, colAvatarD);
+        rowTop = y;
+        y += rightBlockH;
+      } else {
+        final rowH = rightBlockH > avatarD ? rightBlockH : avatarD;
+        avatarRect =
+            Rect.fromLTWH(hPad, y + (rowH - avatarD) / 2, avatarD, avatarD);
+        rowTop = y + (rowH - rightBlockH) / 2;
+        y += rowH;
+      }
+      if (author != null) authorOffset = Offset(rightX, rowTop);
+      if (time != null) {
+        timeOffset = Offset(
+          width - hPad - time!.longestLine,
+          rowTop + (firstH - time!.height) / 2,
+        );
+      }
+      if (twoRows) {
+        final secondLineY = rowTop + firstH + 2;
         if (categoryDotColor != null) {
           categoryDotRect = Rect.fromLTWH(
             rightX,
@@ -826,22 +941,49 @@ class TopicCardLayout {
         } else {
           catTagsOffset = Offset(rightX, secondLineY);
         }
+        if (stats != null) {
+          statsOffset = Offset(
+            width - hPad - stats!.longestLine,
+            secondLineY + (catTags!.height - stats!.height) / 2,
+          );
+        }
+      } else {
+        // 单行:catTags(若为左块)与统计/时间同行
+        if (catTags != null) {
+          if (categoryDotColor != null) {
+            categoryDotRect = Rect.fromLTWH(
+              rightX,
+              rowTop + (catTags!.height - 8) / 2,
+              8,
+              8,
+            );
+            catTagsOffset = Offset(rightX + 12, rowTop);
+          } else {
+            catTagsOffset = Offset(rightX, rowTop);
+          }
+        }
+        if (stats != null) {
+          statsOffset = Offset(
+            width -
+                hPad -
+                (time != null ? time!.longestLine + 10 : 0.0) -
+                stats!.longestLine,
+            rowTop + (firstH - stats!.height) / 2,
+          );
+        }
       }
-      if (stats != null) {
-        statsOffset = Offset(
-          width - hPad - stats!.longestLine,
-          secondLineY + ((catTags?.height ?? stats!.height) - stats!.height) / 2,
-        );
-      }
-      y += rowH;
-      cardHeight = y + vPad + 8;
+      // column 下卡底以头像底兜底(极端:标题单行 + 字段全关)
+      final contentBottom =
+          avatarCol && avatarRect.bottom > y ? avatarRect.bottom : y;
+      cardHeight = contentBottom + vPad + 8;
     }
 
     avatarUrl = avatarUrlValue;
+    animatedAvatarUrl = animatedAvatarUrlValue;
     semanticsLabel = [
       for (final (t, _) in titleSegments) t,
-      if (authorName.isNotEmpty) authorName,
-      timeStr,
+      if (author != null && authorName.isNotEmpty) authorName,
+      if (time != null) timeStr,
     ].join(', ');
   }
 
@@ -909,13 +1051,17 @@ class TopicCardLayout {
     required int likeCount,
     required int replies,
     required Color? heatColor,
+    required TopicCardStyle style,
   }) {
     stats = null;
     final scheme = theme.colorScheme;
     final labelSmall = theme.textTheme.labelSmall ?? const TextStyle();
-    final showLikes = availableWidth >= 300 && likeCount > 0;
-    final showViews = availableWidth >= 460 && views > 0;
-    if (!showLikes && !showViews && replies <= 0) return;
+    // 字段开关与响应式宽度条件取 AND
+    final showLikes =
+        style.showLikes && availableWidth >= 300 && likeCount > 0;
+    final showViews = style.showViews && availableWidth >= 460 && views > 0;
+    final showReplies = style.showReplies && replies > 0;
+    if (!showLikes && !showViews && !showReplies) return;
 
     var base = scheme.onSurfaceVariant.withValues(alpha: 0.75);
     if (isFullyRead) base = base.withValues(alpha: base.a * 0.55);
@@ -946,7 +1092,7 @@ class TopicCardLayout {
 
     if (showViews) item(Symbols.visibility_rounded, views, base);
     if (showLikes) item(Symbols.favorite_border_rounded, likeCount, base);
-    if (replies > 0) {
+    if (showReplies) {
       item(Symbols.chat_bubble_rounded, replies, heat,
           bold: heatColor != null);
     }

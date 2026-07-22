@@ -5,7 +5,6 @@ import 'package:catcher_2/catcher_2.dart';
 import 'package:chinese_font_library/chinese_font_library.dart';
 import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart' show GestureBinding;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -91,6 +90,7 @@ import 'widgets/onboarding_gate.dart';
 import 'widgets/layout/adaptive_scaffold.dart';
 import 'widgets/layout/adaptive_navigation.dart';
 import 'widgets/notification/notification_quick_panel.dart';
+import 'widgets/topic/category_drawer.dart' show CategoryDrawerHost;
 import 'widgets/read_later/read_later_bubble.dart';
 import 'navigation/nav_action_bus.dart';
 import 'navigation/nav_entry.dart';
@@ -146,11 +146,15 @@ Future<void> main() async {
   // 同一个闸门,与标准路径统一错峰;播放中的后续帧不过闸。
   NativeAnimatedImageProvider.firstFrameGate = ImageDecodeGate.run;
 
-  // 触摸重采样:把 pointer 事件重采样到与 vsync 对齐。触摸采样率与
-  // 显示刷新率不同步(如 120Hz 触摸 × 60Hz 显示)时,滚动速度会微观
-  // 不均匀,表现为"不跟手/画面不连贯"。代价是约一帧的输入延迟,
-  // 高刷设备上是标准取舍。
-  GestureBinding.instance.resamplingEnabled = true;
+  // 触摸重采样已定案关闭(回归框架默认 false)。曾为治"120Hz 触摸 ×
+  // 60Hz 显示"的滚动微抖开启(96a94f1),但 SDK 的重采样偏移是按 60Hz
+  // 最坏情况校准的固定 -38ms(gestures/binding.dart _defaultSamplingOffset,
+  // 不随刷新率缩放),高刷设备上触摸位置年龄 ≈46ms(≈5.5 帧),延迟代价
+  // 远超平滑收益——这正是"比原生/其他 Flutter 应用不跟手"的主导项。
+  // 微抖若在低触摸采样率机型复发,回滚方式:
+  //   GestureBinding.instance.resamplingEnabled = true;
+  //   GestureBinding.instance.samplingOffset = const Duration(milliseconds: -15);
+  // (offset 按实际刷新率换算,勿吃 -38 默认值。)
 
   // 掉帧监控:debug/profile 无条件启用;release 由"性能诊断"设置开关
   // 控制(见下方 prefs 读取处)。Logcat 过滤 "JANK",或在设置 → 性能诊断
@@ -160,11 +164,13 @@ Future<void> main() async {
     FrameJankMonitor.start();
   }
 
-  // 定位构建热点用(仅 debug/profile 生效,release 编译器自动剔除):
-  // 打开后 DevTools timeline 的 BUILD 段内会显示每个 widget 的耗时,
-  // 用于追查"重楼层挂载 build 35ms"的具体构成。事件量大,录制请控制
-  // 在 10 秒以内,定位完成后删除。
-  if (!kReleaseMode) {
+  // Widget 级 build profiling 会为每次 build 写 Timeline 事件,对多楼层
+  // 首建场景有明显观察者效应。默认关闭;需要深度归因时通过
+  // --dart-define=FLUXDO_PROFILE_WIDGET_BUILDS=true 临时开启。
+  const profileWidgetBuilds = bool.fromEnvironment(
+    'FLUXDO_PROFILE_WIDGET_BUILDS',
+  );
+  if (!kReleaseMode && profileWidgetBuilds) {
     debugProfileBuildsEnabled = true;
   }
 
@@ -1167,6 +1173,10 @@ class _MainPageState extends ConsumerState<MainPage>
     // 清除 Flutter 图片内存缓存，降低后台内存占用
     PaintingBinding.instance.imageCache.clear();
 
+    // 诊断快照落盘:进程随后被杀时环形缓冲现场不再全丢(监控未启用
+    // 或无记录时内部直接返回;静默失败,不干扰退后台路径)
+    unawaited(FrameJankMonitor.persistSnapshot());
+
     try {
       final user = ref.read(currentUserProvider).value;
       if (user != null) {
@@ -1308,6 +1318,13 @@ class _MainPageState extends ConsumerState<MainPage>
       canPop: false,
       onPopInvokedWithResult: (bool didPop, dynamic result) {
         if (didPop) return;
+        // 分类侧栏开着：返回=关抽屉。抽屉自身的 LocalHistoryEntry 在
+        // 根路由 canPop:false 下不生效（PopScope 的 doNotPop 判定
+        // 优先于 LocalHistoryRoute 的内部消费），只能在这里兜底。
+        if (CategoryDrawerHost.isOpen) {
+          CategoryDrawerHost.close();
+          return;
+        }
         if (NotificationQuickPanel.isVisible) {
           NotificationQuickPanel.dismiss();
           return;

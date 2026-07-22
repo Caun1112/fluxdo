@@ -219,6 +219,10 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
   /// 全局单播放注册表:同屏最多一个实例在播。
   static _AnimatedSvgViewState? _playing;
 
+  /// cacheKey → 快照是否有可见像素:画面空白时不显示播放角标
+  /// (悬浮在空白区的控件脱离画面语境,读者无从判断其归属)。
+  static final Map<int, bool> _snapshotVisibleByKey = <int, bool>{};
+
   /// 大字符串门槛:超过则 hash/剥离等全量扫描挪 isolate。
   static const int _bigSourceBytes = 256 << 10;
 
@@ -306,8 +310,38 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
       img.dispose();
       return;
     }
+    unawaited(_probeSnapshotVisible(key, img.clone()));
     // 入内存缓存(唤醒同 key 等待者,含本实例的 listener)
     _SvgFirstFrameCache.put(key, img);
+  }
+
+  /// 快照可见性探测:抽样扫 alpha,全透明 = 画面空白,不显示播放
+  /// 角标(空白区悬浮的控件脱离画面语境,易被误解)。接管 [img] 所有权。
+  Future<void> _probeSnapshotVisible(int key, ui.Image img) async {
+    try {
+      final data =
+          await img.toByteData(format: ui.ImageByteFormat.rawStraightRgba);
+      if (data == null) return;
+      final bytes = data.buffer.asUint8List();
+      var visible = false;
+      // 抽样步长:最多查 ~4096 个像素,alpha > 8 即视为有内容
+      final pixelCount = bytes.length ~/ 4;
+      final step = (pixelCount / 4096).ceil().clamp(1, 1 << 20);
+      for (var i = 3; i < bytes.length; i += 4 * step) {
+        if (bytes[i] > 8) {
+          visible = true;
+          break;
+        }
+      }
+      _snapshotVisibleByKey[key] = visible;
+      if (mounted && key == _cacheKey && !visible) {
+        setState(() {}); // 已经出快照的实例收掉角标
+      }
+    } catch (_) {
+      // 探测失败按可见处理(不误伤正常图)
+    } finally {
+      img.dispose();
+    }
   }
 
   Future<String> _computeDigest() async {
@@ -449,6 +483,7 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
           return;
         }
         // put 会 bump notifier,本实例经 _onCacheBump clone 出 _snapshot
+        unawaited(_probeSnapshotVisible(key, master.clone()));
         _SvgFirstFrameCache.put(key, master);
         unawaited(_persistSnapshot(master.clone()));
       } finally {
@@ -500,6 +535,7 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
         master.dispose();
         return;
       }
+      unawaited(_probeSnapshotVisible(_cacheKey, master.clone()));
       _SvgFirstFrameCache.put(_cacheKey, master);
       unawaited(_persistSnapshot(master.clone()));
       if (!_liveMounted) {
@@ -577,6 +613,7 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
     }
     timeline.seek(_playClock.elapsed);
     _syncHiddenLayers(doc.root);
+    _unwrapCssPathValues(doc.root); // CSS d:path("...") 帧值解包(上游缺陷)
     _frameBump.bump(); // 直达 CustomPaint.repaint,不走 build
   }
 
@@ -736,6 +773,8 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
         fit: _stretchContent ? BoxFit.fill : BoxFit.contain,
         filterQuality: FilterQuality.medium,
       );
+      // 快照全透明(画面空白)时不显示播放角标
+      if (_snapshotVisibleByKey[_cacheKey] == false) showBadge = false;
     } else if (_electArmed &&
         _offscreenFailed &&
         _SvgFirstFrameCache.tryElect(_cacheKey, _token)) {
@@ -888,7 +927,7 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
 /// 顶层函数以便 compute() 派发大字符串;'v1' 为快照格式版本盐,
 /// 截帧/剥离逻辑变更时递增使旧盘缓存自然失效。
 String _contentDigestTask(String s) {
-  const salt = 0x76312e; // 'v1.'
+  const salt = 0x76322e; // 'v2.'(v1→v2:采样时刻改周期中点+path()解包,旧盘快照失效)
   var h1 = 0x811c9dc5 ^ salt;
   var h2 = 0x01935c1f ^ salt;
   for (var i = 0; i < s.length; i++) {
@@ -909,11 +948,49 @@ String _contentDigestTask(String s) {
   applySvgTheme(doc);
   final anims = SmilParser.parseAnimations(doc);
   if (anims.isNotEmpty) {
-    // seek(0) 把 CSS/SMIL 首帧值写进 DOM 属性,painter 直接照画
-    SvgTimeline(animations: anims, rootNode: doc.root).seek(Duration.zero);
+    // seek 到能代表画面的时刻(手写体 path 动画 t=0 是空白起笔,
+    // 取周期中点让首帧有内容;非周期/未知时长回退 0)
+    SvgTimeline(animations: anims, rootNode: doc.root)
+        .seek(_representativeTime(anims));
     _pruneInvisible(doc.root);
+    _unwrapCssPathValues(doc.root);
   }
   return (doc, anims.isNotEmpty);
+}
+
+/// 选取首帧快照的采样时刻:所有动画共同短周期的中点。
+/// 轮播类(互斥 opacity)在任意时刻都只亮一层,中点无损;
+/// 手写类(d:path 逐帧)中点=写到一半,比 t=0 的空白有信息量。
+Duration _representativeTime(List<SmilAnimation> anims) {
+  Duration shortest = Duration.zero;
+  for (final a in anims) {
+    if (a.dur > Duration.zero && (shortest == Duration.zero || a.dur < shortest)) {
+      shortest = a.dur;
+    }
+  }
+  return shortest == Duration.zero
+      ? Duration.zero
+      : Duration(microseconds: shortest.inMicroseconds ~/ 2);
+}
+
+final RegExp _cssPathFnRe =
+    RegExp(r'''^path\(\s*["']([\s\S]*)["']\s*\)$''');
+
+/// 解包 CSS `d: path("...")` 动画值(上游缺陷):
+/// CSS @keyframes 对 d 属性的动画帧值是 `path("M ...")` 函数包装,
+/// timeline seek 后原样写回 DOM,包 painter 的路径解析不认该前缀
+/// → 整条 path 静默不画(手写签名类 SVG 整图空白)。seek 后把
+/// 包装拆掉还原为裸 path data。
+void _unwrapCssPathValues(SvgNode node) {
+  final attr = node.getAttribute('d');
+  final v = attr?.effectiveValue;
+  if (v is String) {
+    final m = _cssPathFnRe.firstMatch(v.trim());
+    if (m != null) attr!.setAnimatedValue(m.group(1)!);
+  }
+  for (final c in node.children) {
+    _unwrapCssPathValues(c);
+  }
 }
 
 /// 剪除 seek(0) 后有效 opacity≈0 的节点。

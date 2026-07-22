@@ -5,10 +5,12 @@ import 'package:flutter/services.dart';
 // ignore: depend_on_referenced_packages
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../models/topic_card_style.dart';
 import '../navigation/nav_action_bus.dart';
 import '../services/network/request_scheduler_config.dart';
 import '../services/cf_challenge_service.dart';
 import '../utils/blocked_user_filter.dart';
+import '../widgets/topic/topic_card_layout.dart';
 import 'theme_provider.dart';
 
 /// 嵌套视图连接线样式
@@ -176,7 +178,9 @@ class AppPreferences {
   /// 对话框背景高斯模糊
   final bool dialogBlur;
 
-  /// 显示用户签名
+  /// 显示用户签名。默认关闭:签名在网页本就是 opt-in 功能
+  /// (signatures_visible_by_default 默认 false,需用户主动开启),
+  /// 且第三方签名图成本高、良莠不齐,默认关对齐网页更稳妥。
   final bool showSignatures;
 
   /// Boost 弹幕化（默认关闭）
@@ -233,6 +237,9 @@ class AppPreferences {
   /// 编辑器工具栏外显工具 id 列表（空 = 全部收进「更多」面板）
   final List<String> editorToolbarTools;
 
+  /// 话题卡片自定义样式（元信息字段开关 / 头像布局 / 动态头像）
+  final TopicCardStyle topicCardStyle;
+
   AppPreferences({
     required this.autoPanguSpacing,
     required this.displayPanguSpacing,
@@ -263,7 +270,7 @@ class AppPreferences {
     this.aiPostReviewModelKey,
     this.hcaptchaCreateEndpoint,
     required this.dialogBlur,
-    this.showSignatures = true,
+    this.showSignatures = false,
     this.boostDanmaku = false,
     this.defaultNestedView = false,
     this.nestedLineStyle = NestedLineStyle.auto,
@@ -282,6 +289,7 @@ class AppPreferences {
     this.progressGestureLongPressEnabled = true,
     this.progressGestureMenuActions = _defaultProgressGestureMenu,
     this.editorToolbarTools = const [],
+    this.topicCardStyle = TopicCardStyle.defaults,
   });
 
   AppPreferences copyWith({
@@ -333,6 +341,7 @@ class AppPreferences {
     bool? progressGestureLongPressEnabled,
     List<ProgressGestureAction>? progressGestureMenuActions,
     List<String>? editorToolbarTools,
+    TopicCardStyle? topicCardStyle,
   }) {
     return AppPreferences(
       autoPanguSpacing: autoPanguSpacing ?? this.autoPanguSpacing,
@@ -400,6 +409,7 @@ class AppPreferences {
       progressGestureMenuActions:
           progressGestureMenuActions ?? this.progressGestureMenuActions,
       editorToolbarTools: editorToolbarTools ?? this.editorToolbarTools,
+      topicCardStyle: topicCardStyle ?? this.topicCardStyle,
     );
   }
 }
@@ -466,6 +476,7 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   static const String _progressGestureMenuActionsKey =
       'pref_progress_gesture_menu_actions';
   static const String _editorToolbarToolsKey = 'pref_editor_toolbar_tools';
+  static const String _topicCardStyleKey = 'pref_topic_card_style';
 
   static const _crashlyticsChannel = MethodChannel(
     'com.github.lingyan000.fluxdo/crashlytics',
@@ -510,7 +521,7 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
           aiPostReviewModelKey: _prefs.getString(_aiPostReviewModelPrefKey),
           hcaptchaCreateEndpoint: _prefs.getString(_hcaptchaCreateEndpointKey),
           dialogBlur: _prefs.getBool(_dialogBlurKey) ?? true,
-          showSignatures: _prefs.getBool(_showSignaturesKey) ?? true,
+          showSignatures: _prefs.getBool(_showSignaturesKey) ?? false,
           boostDanmaku: _prefs.getBool(_boostDanmakuKey) ?? false,
           defaultNestedView: _prefs.getBool(_defaultNestedViewKey) ?? false,
           nestedLineStyle: NestedLineStyle.fromString(
@@ -556,9 +567,13 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
           ),
           editorToolbarTools:
               _prefs.getStringList(_editorToolbarToolsKey) ?? const [],
+          topicCardStyle: TopicCardStyle.fromJsonString(
+            _prefs.getString(_topicCardStyleKey),
+          ),
         ),
       ) {
     isPortraitLocked = state.portraitLock;
+    TopicCardStyleScope.current = state.topicCardStyle;
     CfChallengeService().autoVerifyEnabled = state.autoCfChallenge;
     _syncSchedulerConfig();
   }
@@ -739,6 +754,16 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   Future<void> setDialogBlur(bool enabled) async {
     state = state.copyWith(dialogBlur: enabled);
     await _prefs.setBool(_dialogBlurKey, enabled);
+  }
+
+  Future<void> setTopicCardStyle(TopicCardStyle style) async {
+    if (state.topicCardStyle == style) return;
+    state = state.copyWith(topicCardStyle: style);
+    // 排版层直读全局快照(免逐调用点透传);stamp 含 style 保证重排,
+    // evictAll 兜底清掉 LRU 里的旧排版
+    TopicCardStyleScope.current = style;
+    TopicCardLayout.evictAll();
+    await _prefs.setString(_topicCardStyleKey, style.toJsonString());
   }
 
   Future<void> setShowSignatures(bool enabled) async {
