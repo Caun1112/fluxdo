@@ -9,7 +9,7 @@ import 'topic_bottom_bar.dart';
 import 'topic_progress_gestures.dart';
 
 /// 话题详情页浮层
-/// 包含进度栏、底部操作栏和悬浮回复按钮
+/// 包含进度栏、底部操作栏和右侧悬浮操作按钮
 ///
 /// 滚动中高频变化的状态一律走 ValueListenable 细粒度下沉,不要提升为
 /// 本组件的构造参数(那会整棵重建底栏 + FAB,实测单次 6~7ms):
@@ -27,6 +27,7 @@ class TopicDetailOverlay extends StatelessWidget {
   final VoidCallback? onShareAsImage;
   final VoidCallback? onExport;
   final VoidCallback onOpenInBrowser;
+  final VoidCallback? onBack;
   final VoidCallback onReply;
   final bool isReadBoostActive;
   final double? readBoostProgress;
@@ -56,6 +57,7 @@ class TopicDetailOverlay extends StatelessWidget {
     this.onShareAsImage,
     this.onExport,
     required this.onOpenInBrowser,
+    this.onBack,
     required this.onReply,
     required this.isReadBoostActive,
     this.readBoostProgress,
@@ -189,22 +191,44 @@ class TopicDetailOverlay extends StatelessWidget {
             child: child!,
           ),
         ),
-        // 悬浮回复按钮
-        if (isLoggedIn)
+        // 右侧操作按钮：手机端显示返回按钮，回复按钮仅在登录后显示。
+        // 两个按钮共用一个定位动画，保证返回按钮始终位于回复按钮上方。
+        if (onBack != null || isLoggedIn)
           ValueListenableBuilder<bool>(
             valueListenable: showBottomBarListenable,
-            child: FloatingActionButton(
-              heroTag: 'replyTopic',
-              onPressed: onReply,
-              child: const Icon(Symbols.reply_rounded),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (onBack != null) ...[
+                  FloatingActionButton(
+                    key: const ValueKey('fab_back'),
+                    heroTag: 'backTopic',
+                    tooltip: MaterialLocalizations.of(
+                      context,
+                    ).backButtonTooltip,
+                    onPressed: onBack,
+                    child: const Icon(Symbols.arrow_back_rounded),
+                  ),
+                  if (isLoggedIn) const SizedBox(height: 12),
+                ],
+                if (isLoggedIn)
+                  FloatingActionButton(
+                    key: const ValueKey('fab_reply'),
+                    heroTag: 'replyTopic',
+                    onPressed: onReply,
+                    child: const Icon(Symbols.reply_rounded),
+                  ),
+              ],
             ),
             builder: (context, showBottomBar, child) => AnimatedPositioned(
-              key: const ValueKey('fab_reply'),
+              key: const ValueKey('topic_action_fabs'),
               duration: const Duration(milliseconds: 200),
               right: 16,
               bottom: showBottomBar
-                  ? bottomPadding + (80 - bottomPadding - 56) / 2
-                  : 16 + bottomPadding,
+                  // 底栏显示时向上留出 12px，避免与底栏视觉挤在一起。
+                  ? bottomPadding + (80 - bottomPadding - 56) / 2 + 12
+                  // 底栏隐藏时整体比原回复按钮上移 16px，方便右手操作。
+                  : 32 + bottomPadding,
               child: child!,
             ),
           ),

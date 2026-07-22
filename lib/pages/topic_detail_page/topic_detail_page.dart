@@ -247,6 +247,10 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
         widget.onEmbeddedShowTabs != null;
   }
 
+  /// 手机端将返回入口放到右侧悬浮按钮组，桌面端保留 AppBar 返回按钮。
+  bool get _showFloatingBackButton =>
+      PlatformUtils.isMobile && !widget.embeddedMode;
+
   int? get _resolvedViewportPostNumber =>
       _controller.viewportPostNumber ?? widget.scrollToPostNumber;
 
@@ -755,6 +759,12 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     }
   }
 
+  /// 右侧悬浮返回按钮沿用系统返回语义：搜索或 AI 子页打开时，先关闭子状态。
+  void _handleFloatingBack() {
+    if (!mounted) return;
+    Navigator.of(context).maybePop();
+  }
+
   void _maybeSwitchToMasterDetail(bool canShowDetailPane) {
     if (widget.embeddedMode) {
       _lastCanShowDetailPane = canShowDetailPane;
@@ -910,7 +920,8 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
               }
 
               return AppBar(
-                automaticallyImplyLeading: !widget.embeddedMode,
+                automaticallyImplyLeading:
+                    !widget.embeddedMode && !_showFloatingBackButton,
                 elevation: currentElevation,
                 scrolledUnderElevation: currentElevation,
                 shadowColor: Colors.transparent,
@@ -1545,6 +1556,7 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     // (它每次更新都是新实例),只取 Overlay 用到的字段。
     final signature = (
       isLoggedIn: isLoggedIn,
+      showFloatingBackButton: _showFloatingBackButton,
       totalCount: detail.postStream.stream.length,
       hasSummary: detail.hasSummary,
       isPrivateMessage: detail.isPrivateMessage,
@@ -1563,6 +1575,7 @@ class _TopicDetailPageState extends ConsumerState<TopicDetailPage>
     final overlay = TopicDetailOverlay(
       showBottomBarListenable: _controller.showBottomBarNotifier,
       isLoggedIn: isLoggedIn,
+      onBack: _showFloatingBackButton ? _handleFloatingBack : null,
       streamIndexListenable: _controller.streamIndexNotifier,
       totalCount: detail.postStream.stream.length,
       detail: detail,
