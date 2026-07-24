@@ -75,6 +75,10 @@ void main() {
     expect(tester.getSize(reply), const Size(56, 56));
     expect(tester.getTopLeft(back).dy, lessThan(tester.getTopLeft(reply).dy));
     expect(tester.getTopLeft(reply).dy - tester.getTopLeft(back).dy, 68);
+    final overlayBottom = tester
+        .getRect(find.byType(TopicDetailOverlay))
+        .bottom;
+    expect(overlayBottom - tester.getBottomRight(reply).dy, 132);
   });
 
   testWidgets('未登录时仍显示返回 FAB，但不显示回复 FAB', (tester) async {

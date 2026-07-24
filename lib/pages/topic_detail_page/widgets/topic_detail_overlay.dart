@@ -225,10 +225,10 @@ class TopicDetailOverlay extends StatelessWidget {
               duration: const Duration(milliseconds: 200),
               right: 16,
               bottom: showBottomBar
-                  // 底栏显示时向上留出 12px，避免与底栏视觉挤在一起。
-                  ? bottomPadding + (80 - bottomPadding - 56) / 2 + 12
-                  // 底栏隐藏时整体比原回复按钮上移 16px，方便右手操作。
-                  : 32 + bottomPadding,
+                  // 底栏显示时向上留出 112px，避免操作按钮过于靠下。
+                  ? bottomPadding + (80 - bottomPadding - 56) / 2 + 112
+                  // 底栏隐藏时整体向上偏移 100px，方便右手操作。
+                  : 132 + bottomPadding,
               child: child!,
             ),
           ),
