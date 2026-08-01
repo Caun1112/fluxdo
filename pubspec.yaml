@@ -172,6 +172,16 @@ dependencies:
   vm_service: ^15.2.0
   full_svg_flutter: ^1.3.0
 dependency_overrides:
+  # 以下三个 override 共同消除 Flutter native-assets：自 objective_c 9.2.0 /
+  # cupertino_http 3.0.0 起，原生库不再走 CocoaPods ffiPlugin，改由 native-assets
+  # 分发 dylib（带 adhoc 签名 + FAT 外壳），TrollStore 重签后过不了 AMFI 校验，
+  # 表现为启动后一直白屏。锁回 ffiPlugin 版本后与其余插件一样由侧载工具统一重签。
+  # cupertino_http 2.4.0 是最后一个 ffiPlugin 版本，native_dio_adapter 1.6.0
+  # 的约束为 >=2.3.0 <4.0.0，可安全锁定。
+  objective_c: 9.1.0
+  cupertino_http: 2.4.0
+  # path_provider_foundation 2.6.0 强制要求 objective_c ^9.2.1，2.5.1 则不依赖它。
+  path_provider_foundation: 2.5.1
   # super_clipboard 0.9.1 要求 device_info_plus <12.0.0，
   # 但实际 12.x 接口兼容，强制使用项目版本
   device_info_plus: 12.3.0

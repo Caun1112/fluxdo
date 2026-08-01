@@ -7,6 +7,9 @@ PODS:
     - Flutter
   - connectivity_plus (0.0.1):
     - Flutter
+  - cupertino_http (0.0.1):
+    - Flutter
+    - FlutterMacOS
   - device_info_plus (0.0.1):
     - Flutter
   - DKImagePickerController/Core (4.3.9):
@@ -103,10 +106,15 @@ PODS:
   - Mantle/extobjc (2.2.0)
   - native_animated_image_ios (0.1.2):
     - Flutter
+  - objective_c (0.0.1):
+    - Flutter
   - open_filex (0.0.2):
     - Flutter
   - package_info_plus (0.4.5):
     - Flutter
+  - path_provider_foundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
   - quickjs_engine (0.1.0):
     - Flutter
   - record_ios (2.0.0):
@@ -164,6 +172,7 @@ DEPENDENCIES:
   - audio_session (from `.symlinks/plugins/audio_session/ios`)
   - chat_bottom_container (from `.symlinks/plugins/chat_bottom_container/ios`)
   - connectivity_plus (from `.symlinks/plugins/connectivity_plus/ios`)
+  - cupertino_http (from `.symlinks/plugins/cupertino_http/darwin`)
   - device_info_plus (from `.symlinks/plugins/device_info_plus/ios`)
   - file_picker (from `.symlinks/plugins/file_picker/ios`)
   - Flutter (from `Flutter`)
@@ -183,8 +192,10 @@ DEPENDENCIES:
   - irondash_engine_context (from `.symlinks/plugins/irondash_engine_context/ios`)
   - just_audio (from `.symlinks/plugins/just_audio/darwin`)
   - native_animated_image_ios (from `.symlinks/plugins/native_animated_image_ios/ios`)
+  - objective_c (from `.symlinks/plugins/objective_c/ios`)
   - open_filex (from `.symlinks/plugins/open_filex/ios`)
   - package_info_plus (from `.symlinks/plugins/package_info_plus/ios`)
+  - path_provider_foundation (from `.symlinks/plugins/path_provider_foundation/darwin`)
   - quickjs_engine (from `.symlinks/plugins/quickjs_engine/ios`)
   - record_ios (from `.symlinks/plugins/record_ios/ios`)
   - rhttp (from `.symlinks/plugins/rhttp/ios`)
@@ -220,6 +231,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/chat_bottom_container/ios"
   connectivity_plus:
     :path: ".symlinks/plugins/connectivity_plus/ios"
+  cupertino_http:
+    :path: ".symlinks/plugins/cupertino_http/darwin"
   device_info_plus:
     :path: ".symlinks/plugins/device_info_plus/ios"
   file_picker:
@@ -258,10 +271,14 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/just_audio/darwin"
   native_animated_image_ios:
     :path: ".symlinks/plugins/native_animated_image_ios/ios"
+  objective_c:
+    :path: ".symlinks/plugins/objective_c/ios"
   open_filex:
     :path: ".symlinks/plugins/open_filex/ios"
   package_info_plus:
     :path: ".symlinks/plugins/package_info_plus/ios"
+  path_provider_foundation:
+    :path: ".symlinks/plugins/path_provider_foundation/darwin"
   quickjs_engine:
     :path: ".symlinks/plugins/quickjs_engine/ios"
   record_ios:
@@ -300,6 +317,7 @@ SPEC CHECKSUMS:
   audio_session: 9bb7f6c970f21241b19f5a3658097ae459681ba0
   chat_bottom_container: f1eb8323db77a87db50f361142c679f11e892d1b
   connectivity_plus: cb623214f4e1f6ef8fe7403d580fdad517d2f7dd
+  cupertino_http: 94ac07f5ff090b8effa6c5e2c47871d48ab7c86c
   device_info_plus: 21fcca2080fbcd348be798aa36c3e5ed849eefbe
   DKImagePickerController: 946cec48c7873164274ecc4624d19e3da4c1ef3c
   DKPhotoGallery: b3834fecb755ee09a593d7c9e389d8b5d6deed60
@@ -324,8 +342,10 @@ SPEC CHECKSUMS:
   libwebp: 02b23773aedb6ff1fd38cec7a77b81414c6842a8
   Mantle: c5aa8794a29a022dfbbfc9799af95f477a69b62d
   native_animated_image_ios: 87dc5ce774f71e44033b0e9ca83b56fd81fa1c8a
+  objective_c: 89e720c30d716b036faf9c9684022048eee1eee2
   open_filex: 432f3cd11432da3e39f47fcc0df2b1603854eff1
   package_info_plus: af8e2ca6888548050f16fa2f1938db7b5a5df499
+  path_provider_foundation: bb55f6dbba17d0dccd6737fe6f7f34fbd0376880
   quickjs_engine: 5549178d16b51c5ec5188363f9c3adaaccea8f50
   record_ios: 390a30c7caaf8b5d0fb1cb1d2fd5064b48b4520c
   rhttp: 359daed992674fc912552df3106bfbc746bcc929
