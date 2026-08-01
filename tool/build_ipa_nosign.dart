@@ -17,11 +17,8 @@ Future<void> main(List<String> args) async {
   }
 
   final yes = args.contains('--yes') || args.contains('-y');
-  final trollStoreLite = args.contains('--trollstore-lite');
   final filteredArgs = args
-      .where(
-        (arg) => arg != '--yes' && arg != '-y' && arg != '--trollstore-lite',
-      )
+      .where((arg) => arg != '--yes' && arg != '-y')
       .toList(growable: false);
 
   if (!Platform.isMacOS) {
@@ -46,17 +43,19 @@ Future<void> main(List<String> args) async {
   }
 
   final ipaDir = Directory('build/ios/ipa')..createSync(recursive: true);
-  final compatibilitySuffix = trollStoreLite ? '-trollstore-lite' : '';
-  final ipaPath = p.join(
-    ipaDir.path,
-    'fluxdo-$version$compatibilitySuffix-nosign.ipa',
-  );
+  final ipaPath = p.join(ipaDir.path, 'fluxdo-$version-nosign.ipa');
 
   stdout.writeln('==> 构建 iOS 无签名 IPA ($version)');
   await runOrExit(
     title: '构建 iOS 应用',
     executable: Platform.resolvedExecutable,
-    arguments: const ['tool/flutterw.dart', 'build', 'ios', '--release', '--no-codesign'],
+    arguments: const [
+      'tool/flutterw.dart',
+      'build',
+      'ios',
+      '--release',
+      '--no-codesign',
+    ],
   );
 
   final runnerApp = Directory('build/ios/iphoneos/Runner.app');
@@ -67,12 +66,11 @@ Future<void> main(List<String> args) async {
 
   final tempDir = await Directory.systemTemp.createTemp('fluxdo_ipa_');
   try {
-    final payloadDir = Directory(p.join(tempDir.path, 'Payload'))..createSync(recursive: true);
+    final payloadDir = Directory(p.join(tempDir.path, 'Payload'))
+      ..createSync(recursive: true);
     final packagedRunner = Directory(p.join(payloadDir.path, 'Runner.app'));
     await _copyDirectory(runnerApp, packagedRunner);
-    if (trollStoreLite) {
-      await _prepareTrollStoreLiteNativeAssets(packagedRunner, tempDir);
-    }
+    await _normalizeNativeAssetFrameworks(packagedRunner);
 
     final ipaFile = File(ipaPath);
     if (ipaFile.existsSync()) {
@@ -94,10 +92,14 @@ Future<void> main(List<String> args) async {
   stdout.writeln('==> IPA 已输出: $ipaPath');
 }
 
-Future<void> _prepareTrollStoreLiteNativeAssets(
-  Directory runnerApp,
-  Directory tempDir,
-) async {
+/// 把 Flutter native-assets 的 Framework 归一化成「thin arm64 + 完全未签名」。
+///
+/// Flutter 会给 native-assets 打上 adhoc 签名并保留 FAT(单 arm64 切片)外壳，
+/// 而 CocoaPods 插件 Framework 是 thin 且完全未签名的。侧载工具在安装时会对
+/// 整个 bundle 统一重签，预置的 adhoc 签名反而让这些库在运行时 dlopen 被
+/// AMFI 判为 code signature invalid，表现为启动后一直白屏。这里把它们对齐到
+/// 与其它插件 Framework 一致的形态，交给安装侧统一签名。
+Future<void> _normalizeNativeAssetFrameworks(Directory runnerApp) async {
   final frameworksDir = Directory(p.join(runnerApp.path, 'Frameworks'));
   final manifestFile = File(
     p.join(
@@ -108,7 +110,7 @@ Future<void> _prepareTrollStoreLiteNativeAssets(
     ),
   );
   if (!manifestFile.existsSync()) {
-    stdout.writeln('==> 未发现 Flutter native-assets，无需应用 TrollStore Lite 兼容处理');
+    stdout.writeln('==> 未发现 Flutter native-assets，跳过归一化');
     return;
   }
 
@@ -118,7 +120,8 @@ Future<void> _prepareTrollStoreLiteNativeAssets(
     exit(1);
   }
 
-  final signingTargets = <String>{};
+  // 二进制路径 -> 所属 .framework 目录(没有则为 null)。
+  final targets = <String, String?>{};
   final nativeAssets = manifest['native-assets'] as Map;
   for (final platformAssets in nativeAssets.values.whereType<Map>()) {
     for (final location in platformAssets.values.whereType<List>()) {
@@ -137,84 +140,84 @@ Future<void> _prepareTrollStoreLiteNativeAssets(
         exit(1);
       }
 
+      final binaryPath = p.normalize(
+        p.joinAll([frameworksDir.path, ...segments]),
+      );
+      if (!p.isWithin(frameworksDir.absolute.path, p.absolute(binaryPath)) ||
+          !FileSystemEntity.isFileSync(binaryPath)) {
+        stderr.writeln('native-assets 目标不存在: $relativePath');
+        exit(1);
+      }
+
       final frameworkIndex = segments.indexWhere(
         (segment) => segment.endsWith('.framework'),
       );
-      final targetSegments = frameworkIndex >= 0
-          ? segments.take(frameworkIndex + 1)
-          : segments;
-      final targetPath = p.normalize(
-        p.joinAll([frameworksDir.path, ...targetSegments]),
-      );
-      if (!p.isWithin(frameworksDir.absolute.path, p.absolute(targetPath)) ||
-          !FileSystemEntity.isFileSync(targetPath) &&
-              !FileSystemEntity.isDirectorySync(targetPath)) {
-        stderr.writeln('native-assets 签名目标不存在: $relativePath');
-        exit(1);
-      }
-      signingTargets.add(targetPath);
+      targets[binaryPath] = frameworkIndex >= 0
+          ? p.normalize(
+              p.joinAll([
+                frameworksDir.path,
+                ...segments.take(frameworkIndex + 1),
+              ]),
+            )
+          : null;
     }
   }
 
-  if (signingTargets.isEmpty) {
-    stdout.writeln('==> 未发现需要兼容处理的 Flutter native-assets');
+  if (targets.isEmpty) {
+    stdout.writeln('==> 未发现需要归一化的 Flutter native-assets');
     return;
   }
 
-  // TrollStore Lite 会在安装时以 merge 模式递归重签，保留这里写入的
-  // PMAP_CS 信任级别；否则运行时 dlopen 的 native-assets 会被 dyld 拒绝。
-  final entitlementsFile = File(
-    p.join(tempDir.path, 'trollstore_lite_native_assets.entitlements'),
-  );
-  await entitlementsFile.writeAsString(_trollStoreLiteNativeAssetEntitlements);
+  for (final binaryPath in targets.keys.toList()..sort()) {
+    final name = p.basename(binaryPath);
 
-  for (final targetPath in signingTargets.toList()..sort()) {
+    // 1. FAT(单 arm64 切片)外壳剥成 thin，与其它插件 Framework 一致。
+    if (await _isFatBinary(binaryPath)) {
+      final thinPath = '$binaryPath.thin';
+      await runOrExit(
+        title: '剥离 FAT 外壳 $name',
+        executable: '/usr/bin/lipo',
+        arguments: ['-thin', 'arm64', binaryPath, '-output', thinPath],
+      );
+      File(thinPath).renameSync(binaryPath);
+    }
+
+    // 2. 去掉 Flutter 预置的 adhoc 签名，交给侧载工具统一重签。
     await runOrExit(
-      title: '处理 TrollStore Lite 原生库 ${p.basename(targetPath)}',
+      title: '移除预置签名 $name',
       executable: '/usr/bin/codesign',
-      arguments: [
-        '--force',
-        '--sign',
-        '-',
-        '--entitlements',
-        entitlementsFile.path,
-        '--force-library-entitlements',
-        '--generate-entitlement-der',
-        targetPath,
-      ],
-    );
-    await runOrExit(
-      title: '验证原生库签名 ${p.basename(targetPath)}',
-      executable: '/usr/bin/codesign',
-      arguments: ['--verify', '--strict', '--verbose=2', targetPath],
+      arguments: ['--remove-signature', binaryPath],
     );
 
-    final verifiedEntitlements = File(
-      p.join(tempDir.path, '${p.basename(targetPath)}.entitlements.plist'),
-    );
-    final dumpResult = await Process.run('/usr/bin/codesign', [
-      '--display',
-      '--entitlements',
-      verifiedEntitlements.path,
-      '--xml',
-      targetPath,
-    ]);
-    final trustResult = dumpResult.exitCode == 0
-        ? await Process.run('/usr/bin/plutil', [
-            '-extract',
-            r'jb\.pmap_cs\.custom_trust',
-            'raw',
-            '-o',
-            '-',
-            verifiedEntitlements.path,
-          ])
-        : null;
-    if (trustResult?.exitCode != 0 ||
-        (trustResult?.stdout as String?)?.trim() != 'PMAP_CS_APP_STORE') {
-      stderr.writeln('原生库信任 entitlement 校验失败: $targetPath');
+    // 3. 清掉残留的 bundle 签名封装目录。
+    final frameworkDir = targets[binaryPath];
+    if (frameworkDir != null) {
+      final codeSignatureDir = Directory(
+        p.join(frameworkDir, '_CodeSignature'),
+      );
+      if (codeSignatureDir.existsSync()) {
+        codeSignatureDir.deleteSync(recursive: true);
+      }
+    }
+
+    // 4. 校验结果确实是 thin 且未签名，避免再次产出白屏包。
+    if (await _isFatBinary(binaryPath)) {
+      stderr.writeln('归一化失败，仍是 FAT 二进制: $binaryPath');
       exit(1);
     }
+    final verify = await Process.run('/usr/bin/codesign', ['-dv', binaryPath]);
+    if (!'${verify.stderr}'.contains('not signed at all')) {
+      stderr.writeln('归一化失败，签名未移除: $binaryPath');
+      exit(1);
+    }
+    stdout.writeln('==> 已归一化 native-assets: $name');
   }
+}
+
+Future<bool> _isFatBinary(String path) async {
+  final result = await Process.run('/usr/bin/lipo', ['-info', path]);
+  return result.exitCode == 0 &&
+      '${result.stdout}'.contains('Architectures in the fat file');
 }
 
 Future<String> _resolveVersion(List<String> args) async {
@@ -239,15 +242,19 @@ String _readVersionFromPubspec() {
   if (!pubspecFile.existsSync()) {
     return '';
   }
-  final match = RegExp(r'^version:\s*(.+)$', multiLine: true).firstMatch(
-    pubspecFile.readAsStringSync(),
-  );
+  final match = RegExp(
+    r'^version:\s*(.+)$',
+    multiLine: true,
+  ).firstMatch(pubspecFile.readAsStringSync());
   return match?.group(1)?.split('+').first.trim() ?? '';
 }
 
 Future<void> _copyDirectory(Directory source, Directory destination) async {
   destination.createSync(recursive: true);
-  await for (final entity in source.list(recursive: false, followLinks: false)) {
+  await for (final entity in source.list(
+    recursive: false,
+    followLinks: false,
+  )) {
     final targetPath = p.join(destination.path, p.basename(entity.path));
     if (entity is Directory) {
       await _copyDirectory(entity, Directory(targetPath));
@@ -260,16 +267,5 @@ Future<void> _copyDirectory(Directory source, Directory destination) async {
 
 const _usage = '''
 用法:
-  dart tool/build_ipa_nosign.dart [版本号] [-y|--yes] [--trollstore-lite]
-''';
-
-const _trollStoreLiteNativeAssetEntitlements = '''
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>jb.pmap_cs.custom_trust</key>
-  <string>PMAP_CS_APP_STORE</string>
-</dict>
-</plist>
+  dart tool/build_ipa_nosign.dart [版本号] [-y|--yes]
 ''';
