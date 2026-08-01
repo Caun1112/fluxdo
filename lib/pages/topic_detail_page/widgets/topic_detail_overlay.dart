@@ -78,7 +78,16 @@ class TopicDetailOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bottomPadding = MediaQuery.of(context).padding.bottom;
+    final mediaQuery = MediaQuery.of(context);
+    final bottomPadding = mediaQuery.padding.bottom;
+    // 返回按钮中心锚定在整屏高度 55% 处(单手拇指位)。本 Stack 位于
+    // 状态栏 + AppBar(kToolbarHeight) 之下,需换算回 Stack 坐标系;
+    // Scaffold 会吞掉 body 的 padding.top,故取 viewPadding.top。
+    final backButtonTop =
+        mediaQuery.size.height * 0.55 -
+        mediaQuery.viewPadding.top -
+        kToolbarHeight -
+        28;
 
     // 三块内容都不依赖 showBottomBar,只有 AnimatedPositioned 的 bottom
     // 依赖 —— 用 VLB 的 child 参数把内容缓存住,滚动方向切换(底栏
@@ -191,34 +200,29 @@ class TopicDetailOverlay extends StatelessWidget {
             child: child!,
           ),
         ),
-        // 右侧操作按钮：手机端显示返回按钮，回复按钮仅在登录后显示。
-        // 两个按钮共用一个定位动画，保证返回按钮始终位于回复按钮上方。
-        if (onBack != null || isLoggedIn)
+        // 右侧悬浮返回按钮：固定在整屏高度 55% 处，不随底栏显隐移动。
+        if (onBack != null)
+          Positioned(
+            key: const ValueKey('topic_back_fab'),
+            right: 16,
+            top: backButtonTop,
+            child: FloatingActionButton(
+              key: const ValueKey('fab_back'),
+              heroTag: 'backTopic',
+              tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+              onPressed: onBack,
+              child: const Icon(Symbols.arrow_back_rounded),
+            ),
+          ),
+        // 右侧悬浮回复按钮：仅登录后显示，随底栏显隐上下移动。
+        if (isLoggedIn)
           ValueListenableBuilder<bool>(
             valueListenable: showBottomBarListenable,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (onBack != null) ...[
-                  FloatingActionButton(
-                    key: const ValueKey('fab_back'),
-                    heroTag: 'backTopic',
-                    tooltip: MaterialLocalizations.of(
-                      context,
-                    ).backButtonTooltip,
-                    onPressed: onBack,
-                    child: const Icon(Symbols.arrow_back_rounded),
-                  ),
-                  if (isLoggedIn) const SizedBox(height: 12),
-                ],
-                if (isLoggedIn)
-                  FloatingActionButton(
-                    key: const ValueKey('fab_reply'),
-                    heroTag: 'replyTopic',
-                    onPressed: onReply,
-                    child: const Icon(Symbols.reply_rounded),
-                  ),
-              ],
+            child: FloatingActionButton(
+              key: const ValueKey('fab_reply'),
+              heroTag: 'replyTopic',
+              onPressed: onReply,
+              child: const Icon(Symbols.reply_rounded),
             ),
             builder: (context, showBottomBar, child) => AnimatedPositioned(
               key: const ValueKey('topic_action_fabs'),

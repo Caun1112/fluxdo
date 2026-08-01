@@ -63,7 +63,12 @@ TopicDetailOverlay _overlay({VoidCallback? onBack, bool isLoggedIn = true}) {
 }
 
 void main() {
-  testWidgets('手机端返回和回复 FAB 同尺寸且返回位于回复上方', (tester) async {
+  testWidgets('手机端返回 FAB 锚定整屏高度 55%，回复 FAB 保持右下', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
     await tester.pumpWidget(_wrap(_overlay(onBack: () {})));
     await tester.pumpAndSettle();
 
@@ -74,7 +79,12 @@ void main() {
     expect(tester.getSize(back), const Size(56, 56));
     expect(tester.getSize(reply), const Size(56, 56));
     expect(tester.getTopLeft(back).dy, lessThan(tester.getTopLeft(reply).dy));
-    expect(tester.getTopLeft(reply).dy - tester.getTopLeft(back).dy, 68);
+    // 返回按钮中心对准整屏高度 55%（测试环境无状态栏/AppBar，
+    // 公式中扣除的 kToolbarHeight 直接体现在期望值里）。
+    expect(
+      tester.getCenter(back).dy,
+      moreOrLessEquals(844 * 0.55 - kToolbarHeight),
+    );
     final overlayBottom = tester
         .getRect(find.byType(TopicDetailOverlay))
         .bottom;
