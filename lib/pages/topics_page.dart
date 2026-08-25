@@ -27,7 +27,8 @@ import '../widgets/common/notification_icon_button.dart';
 import '../widgets/common/anchor_guard_sliver.dart';
 import '../widgets/topic/topic_list_skeleton.dart';
 import '../widgets/topic/keyword_filter_hint_bar.dart';
-import '../widgets/topic/topic_filter_menu.dart';
+import '../widgets/topic/category_tab_manager_sheet.dart'
+    show PinnedCategoryEditPage;
 import '../widgets/common/topic_badges.dart';
 import '../widgets/common/search_capsule.dart';
 import '../widgets/topic/category_drawer.dart';
@@ -53,7 +54,6 @@ import '../l10n/s.dart';
 import '../models/shortcut_binding.dart';
 import '../providers/shortcut_provider.dart';
 import '../widgets/desktop_refresh_indicator.dart';
-import '../services/toast_service.dart';
 import '../utils/dialog_utils.dart';
 import '../utils/platform_utils.dart';
 
@@ -83,7 +83,7 @@ final fabRefreshSignalProvider =
 
 /// Header 区域常量。
 ///
-/// 顶部 = 常驻工具栏 48px（聚合筛选菜单标题「最新 ▾」+ 右簇
+/// 顶部 = 常驻工具栏 48px（页面标题「话题」+ 右簇
 /// 🔕(条件)·搜索落位·🔔）。可折叠段三段式：搜索胶囊行 48（折叠时
 /// 胶囊 Rect.lerp 连续 morph 缩进常驻行右簇的落位格 —— 头部内
 /// "一镜到底"）→ 分类 chips 行 40 → 条件标签行 36。
@@ -979,10 +979,12 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
     );
   }
 
-  /// 打开分类侧栏（右下分类 FAB / chips 行 ＋）。宿主 DrawerController 挂在
-  /// AdaptiveScaffold 顶层（全局手势），这里只发开启指令。
-  void _openCategoryDrawer() {
-    CategoryDrawerHost.open();
+  /// 分类 chips 行的「＋」直接进入常用分类编辑页；日常分类/标签切换由
+  /// 右下角锚定悬浮面板承担，不再从这里拉出左侧抽屉。
+  void _openCategoryEditor() {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const PinnedCategoryEditPage()),
+    );
   }
 
   Future<void> _openTagSelection() async {
@@ -1031,56 +1033,6 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
       return ids[_currentTabIndex - 1];
     }
     return null;
-  }
-
-  void _showDismissConfirmDialog(TopicListFilter currentFilter) {
-    final label = _dismissLabel(currentFilter);
-    showAppDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(context.l10n.topics_dismissConfirmTitle),
-        content: Text(context.l10n.topics_dismissConfirmContent(label)),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(context.l10n.common_cancel),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _doDismiss();
-            },
-            child: Text(context.l10n.common_confirm),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _dismissLabel(TopicListFilter filter) {
-    if (filter == TopicListFilter.newTopics) {
-      final subset = ref.read(topicNewSubsetProvider);
-      switch (subset) {
-        case NewSubset.topics:
-          return context.l10n.topic_filterNewTopicsShort;
-        case NewSubset.replies:
-          return context.l10n.topic_filterNewRepliesShort;
-        case NewSubset.all:
-          return context.l10n.topic_filterNewAllShort;
-      }
-    }
-    return context.l10n.topics_unreadTopics;
-  }
-
-  Future<void> _doDismiss() async {
-    final categoryId = _currentCategoryId();
-    try {
-      await ref.read(topicListProvider(categoryId).notifier).dismissAll();
-    } catch (e) {
-      if (mounted) {
-        ToastService.showError(S.current.common_operationFailed(e.toString()));
-      }
-    }
   }
 
   @override
@@ -1193,8 +1145,8 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
     // （setter 的副作用推迟帧末，build 期调用安全）
     _headerController.extent = _collapsibleExtentFor(pinnedIds, currentTags);
 
-    // 聚合筛选菜单（筛选/子过滤/排序/标签/忽略五合一）;折叠态标题
-    // 前缀承接 chips 收起后的"你在哪"信息（「水源 · 最新」）
+    // 顶部只保留页面标题；折叠态前缀承接 chips 收起后的“你在哪”信息
+    // （「水源 · 话题」）。筛选与排序交互已迁到右下悬浮面板。
     String? tabNameOf(int index) {
       if (index <= 0 || index - 1 >= pinnedIds.length) return null;
       return categoryMap?[pinnedIds[index - 1]]?.name;
@@ -1206,7 +1158,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
       nameResolver: tabNameOf,
       anchorKey: _titlePrefixAnchorKey,
     );
-    final filterMenu = _buildFilterMenu(isLoggedIn, currentFilter, titlePrefix);
+    final filterTitle = _buildPageTitle(titlePrefix);
 
     return Listener(
       onPointerDown: (_) => _cancelSnap(cancelPointerScrollSession: true),
@@ -1250,7 +1202,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
                   key: _headerRootKey,
                   controller: _headerController,
                   statusBarHeight: topPadding,
-                  toolbarChild: _buildToolbar(isLoggedIn, filterMenu),
+                  toolbarChild: _buildToolbar(isLoggedIn, filterTitle),
                   onSearchTap: _openSearch,
                   bellVisible:
                       isLoggedIn && !Responsive.showNavigationRail(context),
@@ -1280,12 +1232,12 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
     );
   }
 
-  /// 常驻工具栏（48px，永不折叠）。左=聚合筛选菜单标题「最新 ▾」
+  /// 常驻工具栏（48px，永不折叠）。左=页面标题「话题」
   /// （Reddit `Home ▾` 模式），右=搜索落位格（折叠时张开
   /// 迎接胶囊 morph 成的图标）+ 🔔。图标 glyph 统一默认 24（与全 app
   /// AppBar 一致），compact 密度只收触控目标不缩 glyph;左右缘 8 +
   /// compact 按钮内边 8 = glyph 距屏 16（M3 基线）。
-  Widget _buildToolbar(bool isLoggedIn, Widget filterMenu) {
+  Widget _buildToolbar(bool isLoggedIn, Widget filterTitle) {
     return SizedBox(
       height: _toolbarRowHeight,
       child: Row(
@@ -1295,7 +1247,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
           // 时标题内部自行让步（前缀先缩，见 _TitleTabPrefix），刚性
           // Row + Spacer 版在窄面板直接撑破右簇
           Expanded(
-            child: Align(alignment: Alignment.centerLeft, child: filterMenu),
+            child: Align(alignment: Alignment.centerLeft, child: filterTitle),
           ),
           // 搜索落位格：展开态零宽（右簇紧凑无空洞），折叠时随 morph
           // 同曲线张开迎接胶囊缩成的图标（胶囊本体在
@@ -1360,8 +1312,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
 
   /// 分类 chips 导航行（可折叠段，40px，仅有收藏分类时存在）：
   /// 全部 + 收藏分类 + ＋。TabBar 降为 chips（YouTube 首页同款），
-  /// 与 TabBarView 仍由 _tabController 双向同步；＋ 打开分类侧栏
-  /// （分类主入口，订阅设置也在侧栏分类行上）。
+  /// 与 TabBarView 仍由 _tabController 双向同步；＋ 进入常用分类编辑页。
   Widget _buildNavRow(List<int> pinnedIds, Map<int, Category>? categoryMap) {
     return SizedBox(
       height: _navRowHeight,
@@ -1371,7 +1322,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
           pinnedIds: pinnedIds,
           categoryMap: categoryMap,
           onReselect: () => ref.read(scrollToTopProvider.notifier).trigger(),
-          onManageCategories: _openCategoryDrawer,
+          onManageCategories: _openCategoryEditor,
           headerController: _headerController,
           selectedChipKey: _selectedChipKey,
         ),
@@ -1441,49 +1392,23 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
     );
   }
 
-  /// 聚合筛选菜单按钮。用 Consumer 局部订阅排序/子过滤状态，收放轻壳
-  /// 与 State 整树都不因排序变化而重建。
-  Widget _buildFilterMenu(
-    bool isLoggedIn,
-    TopicListFilter currentFilter,
-    Widget titlePrefix,
-  ) {
-    final showDismiss =
-        isLoggedIn &&
-        (currentFilter == TopicListFilter.newTopics ||
-            currentFilter == TopicListFilter.unread);
-    return Consumer(
-      builder: (context, ref, _) {
-        final order = ref.watch(topicSortOrderProvider);
-        final ascending = ref.watch(topicSortAscendingProvider);
-        final subset = ref.watch(topicNewSubsetProvider);
-        final tagCount = ref
-            .watch(tabTagsProvider(_currentCategoryId()))
-            .length;
-        return TopicFilterMenuButton(
-          currentFilter: currentFilter,
-          isLoggedIn: isLoggedIn,
-          titleStyle: true,
-          titlePrefix: titlePrefix,
-          onFilterChanged: (filter) {
-            ref.read(topicFilterProvider.notifier).setFilter(filter);
-          },
-          currentSubset: subset,
-          onSubsetChanged: (s) =>
-              ref.read(topicNewSubsetProvider.notifier).setSubset(s),
-          currentOrder: order,
-          ascending: ascending,
-          onOrderChanged: (o) =>
-              ref.read(topicSortOrderProvider.notifier).setOrder(o),
-          onToggleAscending: () =>
-              ref.read(topicSortAscendingProvider.notifier).toggle(),
-          onSelectTags: _openTagSelection,
-          selectedTagCount: tagCount,
-          onDismissAll: showDismiss
-              ? () => _showDismissConfirmDialog(currentFilter)
-              : null,
-        );
-      },
+  /// 顶部只保留当前分类与页面名称；范围选择已完整迁到右下悬浮面板。
+  Widget _buildPageTitle(Widget titlePrefix) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        titlePrefix,
+        Flexible(
+          child: Text(
+            context.l10n.topics_title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
     );
   }
 

@@ -14,13 +14,19 @@ import '../providers/selected_topic_provider.dart';
 import '../providers/shortcut_provider.dart';
 import '../providers/discourse_providers.dart';
 import '../services/dynamic_content_suspension_service.dart';
+import '../services/toast_service.dart';
 import '../utils/platform_utils.dart';
 import '../utils/blur_config.dart';
+import '../utils/dialog_utils.dart';
 import '../utils/responsive.dart';
+import '../widgets/common/tag_selection_sheet.dart';
 import '../widgets/layout/master_detail_layout.dart';
 import '../widgets/layout/pane_projection_back_scope.dart';
 import '../widgets/layout/home_workspace_scope.dart';
-import '../widgets/topic/category_drawer.dart';
+import '../widgets/topic/category_tab_manager_sheet.dart'
+    show PinnedCategoryEditPage;
+import '../widgets/topic/home_quick_filter_panels.dart';
+import '../widgets/topic/sort_and_tags_bar.dart' show filterLabel;
 import 'topics_page.dart';
 import 'search_page.dart';
 import 'settings_page.dart';
@@ -214,7 +220,11 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
         // 预览一个话题下面还挂着"新建话题"的加号，容易被当成回复按钮。
         masterFloatingActionButton: !selectedTopic.isStacked
             ? TopicsFloatingActions(
-                onOpenCategories: CategoryDrawerHost.open,
+                isLoggedIn: user != null,
+                onCategorySelected: _selectQuickCategory,
+                onEditCategories: _openCommonCategoriesEditor,
+                onEditTags: _openHomeTagSelection,
+                onDismissAll: _showDismissConfirmDialog,
                 onCreateTopic: user == null
                     ? null
                     : () => _createTopic(context, ref),
@@ -296,6 +306,90 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
       _leftCategory = null;
       _leftTag = null;
     });
+  }
+
+  void _selectQuickCategory(int? categoryId) {
+    _showFeed();
+    ref.read(activeSidebarCategoryIdProvider.notifier).state = categoryId;
+    ref.read(currentTabCategoryIdProvider.notifier).state = categoryId;
+    if (categoryId != null) {
+      final previous = ref.read(sidebarCategoryTapProvider);
+      ref.read(sidebarCategoryTapProvider.notifier).state = (
+        categoryId: categoryId,
+        nonce: (previous?.nonce ?? 0) + 1,
+      );
+    }
+  }
+
+  void _openCommonCategoriesEditor() {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const PinnedCategoryEditPage()),
+    );
+  }
+
+  Future<void> _openHomeTagSelection() async {
+    final categoryId = ref.read(currentTabCategoryIdProvider);
+    final currentTags = ref.read(tabTagsProvider(categoryId));
+    final tagsAsync = ref.read(tagsProvider);
+    final availableTags = tagsAsync.when(
+      data: (tags) => tags,
+      loading: () => <String>[],
+      error: (_, _) => <String>[],
+    );
+    final result = await showAppBottomSheet<List<String>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => TagSelectionSheet(
+        categoryId: categoryId,
+        availableTags: availableTags,
+        selectedTags: currentTags,
+        maxTags: 99,
+      ),
+    );
+    if (result != null && mounted) {
+      ref.read(tabTagsProvider(categoryId).notifier).state = result;
+    }
+  }
+
+  void _showDismissConfirmDialog() {
+    final currentFilter = ref.read(topicFilterProvider);
+    final label = currentFilter == TopicListFilter.newTopics
+        ? context.l10n.topics_newTopics
+        : context.l10n.topics_unreadTopics;
+    showAppDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(dialogContext.l10n.topics_dismissConfirmTitle),
+        content: Text(
+          dialogContext.l10n.topics_dismissConfirmContent(label),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: Text(dialogContext.l10n.common_cancel),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(dialogContext);
+              final categoryId = ref.read(currentTabCategoryIdProvider);
+              try {
+                await ref
+                    .read(topicListProvider(categoryId).notifier)
+                    .dismissAll();
+              } catch (error) {
+                if (mounted) {
+                  ToastService.showError(
+                    S.current.common_operationFailed(error.toString()),
+                  );
+                }
+              }
+            },
+            child: Text(dialogContext.l10n.common_confirm),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showCategory(Category category) {
@@ -421,15 +515,25 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
 ///
 /// 两个按钮都使用标准 [FloatingActionButton]，尺寸和主题色保持一致。
 /// 主 FAB 展开 Speed Dial 时，分类按钮暂时隐藏，给草稿/发帖动作让位。
+enum _HomeQuickPanelKind { browse, range }
+
 class TopicsFloatingActions extends ConsumerStatefulWidget {
   const TopicsFloatingActions({
     super.key,
-    required this.onOpenCategories,
+    required this.isLoggedIn,
+    required this.onCategorySelected,
+    required this.onEditCategories,
+    required this.onEditTags,
+    this.onDismissAll,
     this.onCreateTopic,
     this.onOpenDrafts,
   });
 
-  final VoidCallback onOpenCategories;
+  final bool isLoggedIn;
+  final ValueChanged<int?> onCategorySelected;
+  final VoidCallback onEditCategories;
+  final VoidCallback onEditTags;
+  final VoidCallback? onDismissAll;
   final VoidCallback? onCreateTopic;
   final VoidCallback? onOpenDrafts;
 
@@ -439,14 +543,22 @@ class TopicsFloatingActions extends ConsumerStatefulWidget {
 }
 
 class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _expandAnimation;
-  final LayerLink _layerLink = LayerLink();
+  late final AnimationController _quickPanelController;
+  late final Animation<double> _quickPanelAnimation;
+  final LayerLink _primaryLayerLink = LayerLink();
+  final LayerLink _browseLayerLink = LayerLink();
+  final LayerLink _rangeLayerLink = LayerLink();
   bool _isExpanded = false;
   OverlayEntry? _overlayEntry;
   LocalHistoryEntry? _historyEntry;
   bool _removingHistory = false;
+  _HomeQuickPanelKind? _quickPanelKind;
+  OverlayEntry? _quickPanelEntry;
+  LocalHistoryEntry? _quickPanelHistoryEntry;
+  bool _removingQuickPanelHistory = false;
   DynamicContentSuspensionLease? _dynamicContentLease;
 
   @override
@@ -460,13 +572,26 @@ class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
       parent: _controller,
       curve: Curves.easeOut,
     );
+    _quickPanelController = AnimationController(
+      duration: const Duration(milliseconds: 180),
+      reverseDuration: const Duration(milliseconds: 140),
+      vsync: this,
+    );
+    _quickPanelAnimation = CurvedAnimation(
+      parent: _quickPanelController,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
   }
 
   @override
   void dispose() {
     _removeHistoryEntry();
     _removeOverlay();
+    _removeQuickPanelHistoryEntry();
+    _removeQuickPanelOverlay();
     _controller.dispose();
+    _quickPanelController.dispose();
     super.dispose();
   }
 
@@ -474,6 +599,7 @@ class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
     if (_isExpanded) {
       _close();
     } else {
+      _closeQuickPanel(immediately: true);
       setState(() => _isExpanded = true);
       _addHistoryEntry();
       _showOverlay();
@@ -520,6 +646,150 @@ class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
     _removingHistory = true;
     entry.remove();
     _removingHistory = false;
+  }
+
+  void _toggleQuickPanel(_HomeQuickPanelKind kind) {
+    if (_quickPanelKind == kind) {
+      _closeQuickPanel();
+      return;
+    }
+    _closeQuickPanel(immediately: true);
+    setState(() => _quickPanelKind = kind);
+    _addQuickPanelHistoryEntry();
+    _showQuickPanelOverlay();
+    _quickPanelController.forward(from: 0);
+    HapticFeedback.lightImpact();
+  }
+
+  void _closeQuickPanel({
+    bool immediately = false,
+    bool fromHistory = false,
+  }) {
+    if (!fromHistory) _removeQuickPanelHistoryEntry();
+    if (_quickPanelKind == null) return;
+    if (immediately) {
+      _quickPanelController.stop();
+      _quickPanelController.value = 0;
+      _removeQuickPanelOverlay();
+      if (mounted) setState(() => _quickPanelKind = null);
+      return;
+    }
+    _quickPanelController.reverse().then((_) {
+      _removeQuickPanelOverlay();
+      if (mounted) setState(() => _quickPanelKind = null);
+    });
+  }
+
+  void _addQuickPanelHistoryEntry() {
+    if (_quickPanelHistoryEntry != null) return;
+    final route = ModalRoute.of(context);
+    if (route == null) return;
+    _quickPanelHistoryEntry = LocalHistoryEntry(
+      impliesAppBarDismissal: false,
+      onRemove: () {
+        _quickPanelHistoryEntry = null;
+        if (!_removingQuickPanelHistory && mounted) {
+          _closeQuickPanel(fromHistory: true);
+        }
+      },
+    );
+    route.addLocalHistoryEntry(_quickPanelHistoryEntry!);
+  }
+
+  void _removeQuickPanelHistoryEntry() {
+    final entry = _quickPanelHistoryEntry;
+    if (entry == null) return;
+    _quickPanelHistoryEntry = null;
+    _removingQuickPanelHistory = true;
+    entry.remove();
+    _removingQuickPanelHistory = false;
+  }
+
+  void _showQuickPanelOverlay() {
+    _removeQuickPanelOverlay();
+    final kind = _quickPanelKind;
+    if (kind == null) return;
+    final link = kind == _HomeQuickPanelKind.browse
+        ? _browseLayerLink
+        : _rangeLayerLink;
+    final scale = Tween<double>(
+      begin: 0.96,
+      end: 1,
+    ).animate(_quickPanelAnimation);
+
+    _quickPanelEntry = OverlayEntry(
+      builder: (overlayContext) {
+        final placeBeside = MediaQuery.sizeOf(overlayContext).height < 520;
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                key: const ValueKey('home-quick-panel-barrier'),
+                behavior: HitTestBehavior.opaque,
+                onTap: _closeQuickPanel,
+                child: const ColoredBox(color: Colors.transparent),
+              ),
+            ),
+            CompositedTransformFollower(
+              link: link,
+              showWhenUnlinked: false,
+              targetAnchor: placeBeside
+                  ? Alignment.centerLeft
+                  : Alignment.topRight,
+              followerAnchor: placeBeside
+                  ? Alignment.centerRight
+                  : Alignment.bottomRight,
+              offset: placeBeside
+                  ? const Offset(-12, 0)
+                  : const Offset(0, -12),
+              child: FadeTransition(
+                opacity: _quickPanelAnimation,
+                child: ScaleTransition(
+                  scale: scale,
+                  alignment: Alignment.bottomRight,
+                  child: Material(
+                    color: Theme.of(overlayContext)
+                        .colorScheme
+                        .surfaceContainerHigh,
+                    elevation: 6,
+                    borderRadius: BorderRadius.circular(16),
+                    clipBehavior: Clip.antiAlias,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 360),
+                      child: kind == _HomeQuickPanelKind.browse
+                          ? HomeBrowseQuickPanel(
+                              onClose: _closeQuickPanel,
+                              onCategorySelected: widget.onCategorySelected,
+                              onEditCategories: () {
+                                _closeQuickPanel(immediately: true);
+                                widget.onEditCategories();
+                              },
+                              onEditTags: () {
+                                _closeQuickPanel(immediately: true);
+                                widget.onEditTags();
+                              },
+                            )
+                          : HomeTopicRangeQuickPanel(
+                              isLoggedIn: widget.isLoggedIn,
+                              onClose: _closeQuickPanel,
+                              onDismissAll: widget.onDismissAll,
+                            ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+    Overlay.of(context).insert(_quickPanelEntry!);
+  }
+
+  void _removeQuickPanelOverlay() {
+    _quickPanelEntry?.remove();
+    _quickPanelEntry?.dispose();
+    _quickPanelEntry = null;
   }
 
   void _showOverlay() {
@@ -598,7 +868,7 @@ class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
           // 主 FAB 副本（在模糊层之上，保持清晰）
           if (dialogBlur)
             CompositedTransformFollower(
-              link: _layerLink,
+              link: _primaryLayerLink,
               showWhenUnlinked: false,
               targetAnchor: Alignment.center,
               followerAnchor: Alignment.center,
@@ -614,7 +884,7 @@ class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
             ),
           // 子按钮：定位到主 FAB 上方
           CompositedTransformFollower(
-            link: _layerLink,
+            link: _primaryLayerLink,
             showWhenUnlinked: false,
             targetAnchor: Alignment.topRight,
             followerAnchor: Alignment.bottomRight,
@@ -678,6 +948,7 @@ class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
   @override
   Widget build(BuildContext context) {
     final showRefresh = ref.watch(fabRefreshModeProvider);
+    final currentFilter = ref.watch(topicFilterProvider);
     final hasPrimaryAction =
         widget.onCreateTopic != null && widget.onOpenDrafts != null;
 
@@ -704,7 +975,7 @@ class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
       final hideFab = _isExpanded && dialogBlur;
 
       primaryFab = CompositedTransformTarget(
-        link: _layerLink,
+        link: _primaryLayerLink,
         child: Opacity(
           opacity: hideFab ? 0 : 1,
           child: FloatingActionButton(
@@ -721,7 +992,7 @@ class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
       );
     }
 
-    final categoryFab = IgnorePointer(
+    final quickFilterFabs = IgnorePointer(
       ignoring: _isExpanded,
       child: ExcludeSemantics(
         excluding: _isExpanded,
@@ -729,12 +1000,36 @@ class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
           opacity: _isExpanded ? 0 : 1,
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOut,
-          child: FloatingActionButton(
-            key: const ValueKey('topics-category-fab'),
-            heroTag: 'browseCategories',
-            tooltip: context.l10n.topics_browseCategories,
-            onPressed: widget.onOpenCategories,
-            child: const Icon(Symbols.category_rounded),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CompositedTransformTarget(
+                link: _rangeLayerLink,
+                child: FloatingActionButton(
+                  key: const ValueKey('topics-range-fab'),
+                  heroTag: 'topicRange',
+                  tooltip: context.l10n.topic_filterTooltip(
+                    filterLabel(currentFilter),
+                  ),
+                  onPressed: () =>
+                      _toggleQuickPanel(_HomeQuickPanelKind.range),
+                  child: const Icon(Symbols.filter_alt_rounded),
+                ),
+              ),
+              const SizedBox(height: 12),
+              CompositedTransformTarget(
+                link: _browseLayerLink,
+                child: FloatingActionButton(
+                  key: const ValueKey('topics-category-fab'),
+                  heroTag: 'browseCategoriesAndTags',
+                  tooltip:
+                      '${context.l10n.category_categories} / ${context.l10n.tag_tabTags}',
+                  onPressed: () =>
+                      _toggleQuickPanel(_HomeQuickPanelKind.browse),
+                  child: const Icon(Symbols.category_rounded),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -743,7 +1038,7 @@ class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
     final actions = Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        categoryFab,
+        quickFilterFabs,
         if (primaryFab != null) ...[const SizedBox(height: 12), primaryFab],
       ],
     );

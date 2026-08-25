@@ -154,6 +154,7 @@
   "topics_newTopics": "New topics",
   "topics_noTopics": "No topics found",
   "topics_searchHint": "Search topics...",
+  "topics_title": "Topics",
   "topics_topicId": "Topic ID",
   "topics_topicIdHint": "e.g., 1095754",
   "topics_unreadTopics": "Unread topics",
