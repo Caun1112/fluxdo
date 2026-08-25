@@ -502,8 +502,9 @@ class _CategoryDrawerState extends ConsumerState<CategoryDrawer> {
                     onChanged: (v) => setState(() => _showTags = v),
                   ),
                   const Spacer(),
-                  if (!_showTags && pinnedIds.isNotEmpty)
+                  if (!_showTags)
                     IconButton(
+                      key: const ValueKey('manage-common-categories'),
                       icon: const Icon(Symbols.edit_rounded, size: 20),
                       tooltip: S.current.common_edit,
                       visualDensity: VisualDensity.compact,
@@ -599,9 +600,20 @@ class _CategoryDrawerState extends ConsumerState<CategoryDrawer> {
         return ListView(
           padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
           children: [
-            // —— 收藏区（点行切首页对应分类 tab，无展开语义）——
-            if (pinned.isNotEmpty) ...[
-              _SectionLabel(text: S.current.category_myCategories),
+            // —— 常用分类（点行切首页对应分类 tab，无展开语义）——
+            KeyedSubtree(
+              key: const ValueKey('common-categories-section'),
+              child: _SectionLabel(text: S.current.category_myCategories),
+            ),
+            if (pinned.isEmpty)
+              ListTile(
+                key: const ValueKey('common-categories-empty'),
+                leading: const Icon(Symbols.add_rounded),
+                title: Text(S.current.category_editHint),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                onTap: () => _closeAndPush(const PinnedCategoryEditPage()),
+              )
+            else ...[
               for (final category in pinned)
                 _CategoryRow(
                   category: category,
@@ -618,8 +630,8 @@ class _CategoryDrawerState extends ConsumerState<CategoryDrawer> {
                     level: levelFor(category),
                   ),
                 ),
-              const SizedBox(height: 12),
             ],
+            const SizedBox(height: 12),
             // —— 全部分类区（父子分组，子分类默认折叠）——
             _SectionLabel(text: S.current.category_allCategories),
             for (final parent in topLevel) ...[

@@ -189,7 +189,7 @@ class AdaptiveScaffold extends ConsumerWidget {
           child: const SidebarNotificationPanel(),
         ),
         // 分类侧栏：宿主挂本层 Stack 末位（盖得住底栏/FAB，被详情页
-        // 路由天然遮挡）。打开方式：☰ / chips ＋ / 首页"全部"tab 整页
+        // 路由天然遮挡）。打开方式：右下分类 FAB / chips ＋ / 首页"全部"tab 整页
         // 右滑跟手拖出（TabBarView 首缘 overscroll 逐帧喂 dragBy，见
         // TopicsPage）。受控实现（非 DrawerController：其拖拽驱动是
         // 私有 API，做不了外部逐帧喂增量的跟手拖出）。

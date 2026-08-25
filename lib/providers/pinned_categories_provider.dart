@@ -16,6 +16,17 @@ class PinnedCategoriesNotifier extends StateNotifier<List<int>> {
     return list.map((s) => int.tryParse(s)).whereType<int>().toList();
   }
 
+  /// 仅在用户从未保存过常用分类时写入默认项。
+  ///
+  /// 已保存的空列表代表用户主动删空，必须尊重，不能再次自动回填。
+  void seedIfUnset(Iterable<int> categoryIds) {
+    if (_prefs.containsKey(_key)) return;
+    final ids = categoryIds.toSet().toList(growable: false);
+    if (ids.isEmpty) return;
+    state = ids;
+    _save();
+  }
+
   void add(int categoryId) {
     if (state.contains(categoryId)) return;
     state = [...state, categoryId];

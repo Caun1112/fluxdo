@@ -83,7 +83,7 @@ final fabRefreshSignalProvider =
 
 /// Header 区域常量。
 ///
-/// 顶部 = 常驻工具栏 48px（☰ + 聚合筛选菜单标题「最新 ▾」+ 右簇
+/// 顶部 = 常驻工具栏 48px（聚合筛选菜单标题「最新 ▾」+ 右簇
 /// 🔕(条件)·搜索落位·🔔）。可折叠段三段式：搜索胶囊行 48（折叠时
 /// 胶囊 Rect.lerp 连续 morph 缩进常驻行右簇的落位格 —— 头部内
 /// "一镜到底"）→ 分类 chips 行 40 → 条件标签行 36。
@@ -91,6 +91,15 @@ const _toolbarRowHeight = 48.0;
 const _capsuleRowHeight = 48.0;
 const _navRowHeight = 40.0;
 const _tagsRowHeight = 36.0;
+
+/// 首次安装默认展示的常用分类。运行时按 slug 解析为当前站点分类 ID，
+/// 缺失或不可见的分类会被自然忽略，不把站点 ID 写死在客户端。
+const _defaultPinnedCategorySlugs = <String>[
+  'develop',
+  'resource',
+  'news',
+  'welfare',
+];
 
 /// 首页运动系统统一弹簧,定义与说明见 [kHeaderMotionSpring]。
 final SpringDescription _kHeaderSpring = kHeaderSpringDescription;
@@ -699,6 +708,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
 
   late final _HeaderCollapseController _headerController;
   bool _invalidateScheduled = false;
+  bool _defaultPinnedInitializationScheduled = false;
   Timer? _pointerScrollIdleTimer;
   bool _pointerScrolling = false;
 
@@ -796,6 +806,24 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
           _tabController.animateTo(_tabController.index + 1);
         }
       },
+    });
+  }
+
+  void _seedDefaultPinnedCategories(Map<int, Category>? categoryMap) {
+    if (_defaultPinnedInitializationScheduled || categoryMap == null) return;
+    final categoriesBySlug = {
+      for (final category in categoryMap.values) category.slug: category,
+    };
+    final defaultIds = _defaultPinnedCategorySlugs
+        .map((slug) => categoriesBySlug[slug]?.id)
+        .whereType<int>()
+        .toList(growable: false);
+    if (defaultIds.isEmpty) return;
+
+    _defaultPinnedInitializationScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(pinnedCategoriesProvider.notifier).seedIfUnset(defaultIds);
     });
   }
 
@@ -951,7 +979,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
     );
   }
 
-  /// 打开分类侧栏（☰ / chips 行 ＋）。宿主 DrawerController 挂在
+  /// 打开分类侧栏（右下分类 FAB / chips 行 ＋）。宿主 DrawerController 挂在
   /// AdaptiveScaffold 顶层（全局手势），这里只发开启指令。
   void _openCategoryDrawer() {
     CategoryDrawerHost.open();
@@ -1078,6 +1106,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
     ];
     final categoryMapAsync = ref.watch(categoryMapProvider);
     final categoryMap = categoryMapAsync.value;
+    _seedDefaultPinnedCategories(categoryMap);
     // 首页卡片统一复用页面层的分类快照，避免每张 TopicCard 单独订阅
     // categoryMapProvider。加载期也传空 Map，防止卡片回退为逐卡 watch。
     final topicCategoryMap = categoryMap ?? const <int, Category>{};
@@ -1236,7 +1265,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
                   collapsibleChild: Column(
                     children: [
                       // 无收藏分类时不显示 chips 行（只有"全部"+"＋"
-                      // 是空壳）;分类主入口在 ☰ 侧栏
+                      // 是空壳）;分类主入口在右下分类 FAB
                       if (pinnedIds.isNotEmpty)
                         _buildNavRow(pinnedIds, categoryMap),
                       if (currentTags.isNotEmpty) _buildTagsRow(currentTags),
@@ -1251,8 +1280,8 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
     );
   }
 
-  /// 常驻工具栏（48px，永不折叠）。左=☰ 分类侧栏 + 聚合筛选菜单标题
-  /// 「最新 ▾」（Reddit `Home ▾` 模式），右=搜索落位格（折叠时张开
+  /// 常驻工具栏（48px，永不折叠）。左=聚合筛选菜单标题「最新 ▾」
+  /// （Reddit `Home ▾` 模式），右=搜索落位格（折叠时张开
   /// 迎接胶囊 morph 成的图标）+ 🔔。图标 glyph 统一默认 24（与全 app
   /// AppBar 一致），compact 密度只收触控目标不缩 glyph;左右缘 8 +
   /// compact 按钮内边 8 = glyph 距屏 16（M3 基线）。
@@ -1262,14 +1291,6 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
       child: Row(
         children: [
           const SizedBox(width: 8),
-          // ☰ 全平台常显：分类侧栏的显性入口（侧栏走根 Navigator
-          // 路由，rail/底栏任何布局形态下都可用）
-          IconButton(
-            icon: const Icon(Symbols.menu_rounded),
-            onPressed: _openCategoryDrawer,
-            tooltip: context.l10n.topics_browseCategories,
-            visualDensity: VisualDensity.compact,
-          ),
           // 标题区弹性化：窄面板（桌面 master-detail 列表栏）空间不足
           // 时标题内部自行让步（前缀先缩，见 _TitleTabPrefix），刚性
           // Row + Spacer 版在窄面板直接撑破右簇
@@ -1771,7 +1792,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
 
 // ─── Collapsible Header ───
 
-/// overlay 顶栏：状态栏 + 常驻工具栏（☰ + 筛选标题 + 🔕·搜索落位·🔔）
+/// overlay 顶栏：状态栏 + 常驻工具栏（筛选标题 + 🔕·搜索落位·🔔）
 /// + 可折叠段（搜索胶囊行 → 分类 chips 行 → 条件标签行）。
 ///
 /// ## 胶囊 morph（头部内一镜到底）
@@ -2307,7 +2328,7 @@ class _SearchSlotSpacer extends StatelessWidget {
 ///
 /// chip 内不挂任何随选中态增减的附件（曾试过选中 chip 尾部长订阅
 /// 铃铛：宽度随选中迁移变化，整行弹宽必抖，已废）——分类的操作
-/// （订阅/收藏）统一在 ☰ 侧栏的分类行上。
+/// （订阅/收藏）统一在分类侧栏的分类行上。
 class _CategoryChipsRow extends StatelessWidget {
   const _CategoryChipsRow({
     required this.tabController,

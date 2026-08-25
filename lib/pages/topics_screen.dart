@@ -20,6 +20,7 @@ import '../utils/responsive.dart';
 import '../widgets/layout/master_detail_layout.dart';
 import '../widgets/layout/pane_projection_back_scope.dart';
 import '../widgets/layout/home_workspace_scope.dart';
+import '../widgets/topic/category_drawer.dart';
 import 'topics_page.dart';
 import 'search_page.dart';
 import 'settings_page.dart';
@@ -211,10 +212,15 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
         // TopicDetailPage.truncateOnPush 注释），不是列表——"新建话题"这个
         // FAB 只在 master 真的是列表时才有意义，之前没跟着切换，压栈后
         // 预览一个话题下面还挂着"新建话题"的加号，容易被当成回复按钮。
-        masterFloatingActionButton: user != null && !selectedTopic.isStacked
-            ? _TopicsFab(
-                onCreateTopic: () => _createTopic(context, ref),
-                onOpenDrafts: () => _openDrafts(context),
+        masterFloatingActionButton: !selectedTopic.isStacked
+            ? TopicsFloatingActions(
+                onOpenCategories: CategoryDrawerHost.open,
+                onCreateTopic: user == null
+                    ? null
+                    : () => _createTopic(context, ref),
+                onOpenDrafts: user == null
+                    ? null
+                    : () => _openDrafts(context),
               )
             : null,
         ),
@@ -411,18 +417,28 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
   }
 }
 
-/// 首页 FAB：向上滚动时切换为刷新按钮，正常模式下点击展开 Speed Dial 菜单
-class _TopicsFab extends ConsumerStatefulWidget {
-  const _TopicsFab({required this.onCreateTopic, required this.onOpenDrafts});
+/// 首页右下角操作组：分类入口常驻；登录后下方显示刷新/新建主 FAB。
+///
+/// 两个按钮都使用标准 [FloatingActionButton]，尺寸和主题色保持一致。
+/// 主 FAB 展开 Speed Dial 时，分类按钮暂时隐藏，给草稿/发帖动作让位。
+class TopicsFloatingActions extends ConsumerStatefulWidget {
+  const TopicsFloatingActions({
+    super.key,
+    required this.onOpenCategories,
+    this.onCreateTopic,
+    this.onOpenDrafts,
+  });
 
-  final VoidCallback onCreateTopic;
-  final VoidCallback onOpenDrafts;
+  final VoidCallback onOpenCategories;
+  final VoidCallback? onCreateTopic;
+  final VoidCallback? onOpenDrafts;
 
   @override
-  ConsumerState<_TopicsFab> createState() => _TopicsFabState();
+  ConsumerState<TopicsFloatingActions> createState() =>
+      _TopicsFloatingActionsState();
 }
 
-class _TopicsFabState extends ConsumerState<_TopicsFab>
+class _TopicsFloatingActionsState extends ConsumerState<TopicsFloatingActions>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   late final Animation<double> _expandAnimation;
@@ -612,7 +628,7 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
                   label: context.l10n.topicsScreen_myDrafts,
                   onTap: () {
                     _close(immediately: true);
-                    widget.onOpenDrafts();
+                    widget.onOpenDrafts!();
                   },
                   theme: theme,
                 ),
@@ -622,7 +638,7 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
                   label: context.l10n.topicsScreen_createTopic,
                   onTap: () {
                     _close(immediately: true);
-                    widget.onCreateTopic();
+                    widget.onCreateTopic!();
                   },
                   theme: theme,
                 ),
@@ -662,21 +678,24 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
   @override
   Widget build(BuildContext context) {
     final showRefresh = ref.watch(fabRefreshModeProvider);
+    final hasPrimaryAction =
+        widget.onCreateTopic != null && widget.onOpenDrafts != null;
 
     // 刷新模式切换时自动收起
     if (showRefresh && _isExpanded) {
       _close();
     }
 
-    final Widget fab;
-    if (showRefresh) {
+    Widget? primaryFab;
+    if (hasPrimaryAction && showRefresh) {
       // 刷新模式：简单的单按钮
-      fab = FloatingActionButton(
+      primaryFab = FloatingActionButton(
+        key: const ValueKey('topics-primary-fab'),
         heroTag: 'createTopic',
         onPressed: _refreshTopics,
         child: const Icon(Symbols.refresh_rounded),
       );
-    } else {
+    } else if (hasPrimaryAction) {
       // 主 FAB（作为锚点，子按钮在 Overlay 中定位到它上方）
       // 模糊开启时，展开后隐藏真实 FAB（overlay 中有 sharp 副本）
       final dialogBlur = ref.watch(
@@ -684,11 +703,12 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
       );
       final hideFab = _isExpanded && dialogBlur;
 
-      fab = CompositedTransformTarget(
+      primaryFab = CompositedTransformTarget(
         link: _layerLink,
         child: Opacity(
           opacity: hideFab ? 0 : 1,
           child: FloatingActionButton(
+            key: const ValueKey('topics-primary-fab'),
             heroTag: 'createTopic',
             onPressed: _toggle,
             child: AnimatedRotation(
@@ -700,6 +720,33 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
         ),
       );
     }
+
+    final categoryFab = IgnorePointer(
+      ignoring: _isExpanded,
+      child: ExcludeSemantics(
+        excluding: _isExpanded,
+        child: AnimatedOpacity(
+          opacity: _isExpanded ? 0 : 1,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+          child: FloatingActionButton(
+            key: const ValueKey('topics-category-fab'),
+            heroTag: 'browseCategories',
+            tooltip: context.l10n.topics_browseCategories,
+            onPressed: widget.onOpenCategories,
+            child: const Icon(Symbols.category_rounded),
+          ),
+        ),
+      ),
+    );
+
+    final actions = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        categoryFab,
+        if (primaryFab != null) ...[const SizedBox(height: 12), primaryFab],
+      ],
+    );
 
     // 跟随底栏升降：FAB 的 Positioned 锚在系统安全区基线
     // （MasterDetailLayout 用 viewPadding），底栏可见时按可见度把
@@ -720,7 +767,7 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
           child: child,
         );
       },
-      child: fab,
+      child: actions,
     );
   }
 
