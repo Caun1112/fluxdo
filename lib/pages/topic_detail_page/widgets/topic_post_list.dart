@@ -3,7 +3,7 @@ import 'dart:async' show Timer;
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart' show SchedulerBinding, Priority;
+import '../../../utils/idle_task.dart';
 import 'package:app_icons/app_icons.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,13 +18,24 @@ import '../../../utils/responsive.dart';
 import '../../../utils/scroll_busy_signal.dart';
 import '../../../utils/time_utils.dart';
 import '../../../widgets/common/anchor_guard_sliver.dart';
-import '../../../widgets/common/loading_spinner.dart';
-import 'package:fluxdo_render/fluxdo_render.dart' show HtmlChunk;
+import '../../../widgets/post/post_item/widgets/post_voting_answer_header.dart';
+import 'package:m3e_ui/m3e_ui.dart';
+import 'package:fluxdo_render/fluxdo_render.dart'
+    show
+        BlockNode,
+        HeadingAnchorRegistry,
+        HeadingAnchorScope,
+        HtmlChunk,
+        ParagraphWarmup,
+        ParagraphWarmupProbe;
 import '../../../widgets/post/post_item/post_item.dart';
 import '../../../widgets/post/post_item/render_parse_cache.dart';
 import '../../../widgets/post/post_item/segmented_long_post.dart';
+import '../../../widgets/post/small_action_item.dart' show PostTypes;
+import '../../../widgets/post/quote_image_scope.dart';
 import 'topic_detail_header.dart';
 import 'shared_issue_button.dart';
+import 'topic_more_topics.dart';
 import 'typing_indicator.dart';
 import 'pending_posts_section.dart';
 
@@ -104,6 +115,19 @@ class TopicPostList extends StatefulWidget {
   final String? highlightBoostUsername;
   final bool hideHeaderTitle;
 
+  /// 当前用户是否有指定权限(discourse-assign can_assign)——控制每条
+  /// 帖子"更多"菜单里"指定帖子"这一项是否显示。
+  final bool canAssignPost;
+
+  /// 话题目录(TOC)的标题锚点注册表;非 null 时给 1 楼各段包
+  /// HeadingAnchorScope,标题挂载即注册(跳转/高亮定位用)。
+  final HeadingAnchorRegistry? headingAnchorRegistry;
+
+  /// 问答话题排序(「N 个回答」头部的按票数/按活动 pill):
+  /// null = 非问答话题不渲染头部
+  final bool isActivitySort;
+  final ValueChanged<bool>? onAnswerSortChanged;
+
   const TopicPostList({
     super.key,
     required this.detail,
@@ -115,6 +139,7 @@ class TopicPostList extends StatefulWidget {
     required this.highlightPostNumber,
     this.highlightBoostUsername,
     this.hideHeaderTitle = false,
+    this.canAssignPost = false,
     required this.isLoggedIn,
     required this.hasMoreBefore,
     required this.hasMoreAfter,
@@ -151,6 +176,9 @@ class TopicPostList extends StatefulWidget {
     this.onShowPostDetail,
     this.onWithdrawPendingPost,
     this.onWithdrawAndEditPendingPost,
+    this.isActivitySort = false,
+    this.onAnswerSortChanged,
+    this.headingAnchorRegistry,
   });
 
   @override
@@ -404,6 +432,13 @@ class _TopicPostListState extends State<TopicPostList> {
 
     if (!scrollController.hasClients) return;
     final position = scrollController.position;
+    // 弹簧过冲(BouncingScrollPhysics 出界回弹)期间冻结上报:出界时
+    // remainingScroll 被压出正常区间,progress 被 clamp 到 0/1,eyeline
+    // 钉死在视口顶/底;过冲还会把列表边缘帖(最后一帖等)拉进视口,
+    // closest 兜底必命中它 —— 进度条瞬跳到 N/N(或视口顶帖),回弹才
+    // 恢复;visiblePosts 误报更会经 screenTrack 把末帖标记已读,污染
+    // 服务端 lastRead。回界后滚动通知会再次触发本方法,无需补偿。
+    if (position.outOfRange) return;
     final viewportHeight = position.viewportDimension;
 
     // 视口可见区域的上下边界
@@ -524,15 +559,29 @@ class _TopicPostListState extends State<TopicPostList> {
     return result;
   }
 
-  /// 滚动停下后空闲预热:把已进列表的长帖中尚未解析的 chunk 逐块解析,
-  /// 每个 idle task 只解析一块(1-3ms),再滚到它们时 parse 直接命中缓存。
-  /// 新滚动开始(_warmUpGeneration 递增)即停止,不与滚动帧抢主线程。
+  /// 滚动停下后空闲预热,两级流水(单 idle task 只做一小步,不与滚动帧
+  /// 抢主线程;新滚动开始 _warmUpGeneration 递增即全部停):
+  ///
+  /// 1. **chunk 预解析**(原有):把已进列表的长帖中尚未解析的 chunk
+  ///    逐块解析(1-3ms/块),再滚到时 parse 命中 RenderParseCache;
+  /// 2. **段落预 flatten + 预排版**(笔2 新增):对滚动方向前方的楼层,
+  ///    把顶层段落 flatten 进 FlattenCache、纯文字段落排版进
+  ///    ParagraphLayoutCache —— 首次滚到也全程查表(直绘零排版)。
+  ///    缓存 key 经 ParagraphWarmupProbe 探针取自真实挂载(theme/
+  ///    baseStyle/env/宽度全同源,不手工重建);探针未收敛(首屏尚无
+  ///    直绘块挂载)则本轮只跑第 1 级。
   int _warmUpGeneration = 0;
+
+  /// 段落预热游标:(postId, nodeIndex);楼层列表变化后从头再扫
+  /// (已热的段落是缓存命中,重扫只付查表成本)。
+  int? _warmPostCursor;
+  int _warmNodeCursor = 0;
 
   void _scheduleChunkWarmUp() {
     final generation = ++_warmUpGeneration;
     void step() {
       if (!mounted || generation != _warmUpGeneration) return;
+      // ---- 级 1:未解析 chunk ----
       LongPostParseData? pending;
       for (final entry in _longPostRenderCache.values) {
         final data = entry.newEngineData?.parseData;
@@ -541,15 +590,120 @@ class _TopicPostListState extends State<TopicPostList> {
           break;
         }
       }
-      if (pending == null) return;
-      SchedulerBinding.instance.scheduleTask(() {
-        if (!mounted || generation != _warmUpGeneration) return;
-        pending!.warmUpOneChunk();
-        step();
-      }, Priority.idle);
+      if (pending != null) {
+        // scheduleIdleTask 是我们自己包的安全版:Flutter 3.44 的
+        // SchedulerBinding.scheduleTask(idle) 撞上持续动画会让事件循环
+        // 忙等活锁(Windows 上表现为窗口卡死),原生 scheduleTask 不能用。
+        scheduleIdleTask(
+          () {
+            pending!.warmUpOneChunk();
+            step();
+          },
+          isCanceled: () => !mounted || generation != _warmUpGeneration,
+        );
+        return;
+      }
+      // ---- 级 2:方向前方楼层的段落 flatten + 排版 ----
+      _scheduleParagraphWarmUp(generation);
     }
 
     step();
+  }
+
+  /// 段落预热一步:取滚动方向前方(向下读 = 当前楼层之后)最近的
+  /// 未热完楼层,预热其顶层段落;单步预算 4ms,步进由 idle task 驱动。
+  void _scheduleParagraphWarmUp(int generation) {
+    final snapshot = ParagraphWarmupProbe.snapshot();
+    if (snapshot == null) return; // 探针未收敛,等下次滚动停止再试
+    final posts = detail.postStream.posts;
+    if (posts.isEmpty) return;
+
+    // 从当前可见楼层向后扫(简化方向感知:向下阅读是绝对主流;向上
+    // 回滚由 FlattenCache/LayoutCache 的 LRU 覆盖 —— 刚看过的都在)。
+    final anchorNumber = _lastReportedPostNumber;
+    var startIndex = anchorNumber == null
+        ? 0
+        : (_postNumberToIndex[anchorNumber] ?? 0);
+    // 游标续跑:同一楼层没热完接着热,否则从锚点楼层往后找。
+    // scheduleIdleTask 是我们自己包的安全版,原因见 _scheduleChunkWarmUp
+    // 顶部注释(原生 SchedulerBinding.scheduleTask(idle) 撞持续动画会
+    // 活锁)。
+    scheduleIdleTask(
+      () {
+      // 找目标楼层:游标楼层仍有效则续,否则从 startIndex 起第一个
+      // 已有解析产物的楼层(不为预热触发解析 —— 短帖解析很便宜但
+      // 语义上归级 1/首建;这里只吃现成 AST)。
+      List<BlockNode>? nodes;
+      int? postId;
+      if (_warmPostCursor != null) {
+        final idx = posts.indexWhere((p) => p.id == _warmPostCursor);
+        if (idx >= 0) {
+          nodes = _warmNodesFor(posts[idx]);
+          postId = _warmPostCursor;
+        }
+      }
+      if (nodes == null) {
+        _warmNodeCursor = 0;
+        for (var i = startIndex; i < posts.length; i++) {
+          final candidate = _warmNodesFor(posts[i]);
+          if (candidate != null && candidate.isNotEmpty) {
+            // 已全热完的楼层 warmParagraphs 一圈查表(<0.1ms)后返回 -1,
+            // 游标自然推进,不重复付费。
+            nodes = candidate;
+            postId = posts[i].id;
+            break;
+          }
+        }
+      }
+      if (nodes == null || postId == null) return; // 前方无可热楼层,收工
+
+      final next = ParagraphWarmup.warmParagraphs(
+        nodes: nodes,
+        ctx: snapshot,
+        context: context,
+        // 预热产物按 (inlines 身份, style, theme) 进全局缓存,handler 用
+        // 共享 static(emoji/mention/localDate/math/download)+ 无 post
+        // 语境的兜底即可 —— 挂载时若 handler 语义不同也不影响:内容同
+        // 身份 → 命中的是 span/排版,recognizer 行为经 mount 桥现取活
+        // context,linkHandler 闭包冻结的 post.id 仅用于点击追踪,预热
+        // 段落全部来自「该 post 自己的 AST」,forPost 语义一致。
+        totalImagesInPost: 0,
+        startIndex: _warmNodeCursor,
+        budgetMicros: 4000,
+      );
+      if (next == -1) {
+        // 本楼层热完,游标移到下一楼层(下一步找)。
+        final idx = posts.indexWhere((p) => p.id == postId);
+        _warmPostCursor =
+            (idx >= 0 && idx + 1 < posts.length) ? posts[idx + 1].id : null;
+        _warmNodeCursor = 0;
+        if (_warmPostCursor == null) return; // 到底了
+      } else {
+        _warmPostCursor = postId;
+        _warmNodeCursor = next;
+      }
+      _scheduleParagraphWarmUp(generation); // 下一 idle 步
+      },
+      isCanceled: () => !mounted || generation != _warmUpGeneration,
+    );
+  }
+
+  /// 楼层的现成 AST(只取已解析的,不触发解析):
+  /// - 短帖:RenderParseCache.shortPost(命中即回;未解析过的短帖
+  ///   解析本身 1-3ms,顺带做了也无妨 —— shortPost 内部会解析并缓存);
+  /// - 长帖:各 chunk 均已由级 1 热过,拼接全部 chunk 节点。
+  List<BlockNode>? _warmNodesFor(Post post) {
+    final longEntry = _longPostRenderCache[post.id];
+    final parseData = longEntry?.newEngineData?.parseData;
+    if (parseData != null) {
+      if (!parseData.fullyParsed) return null; // 级 1 尚未完成,先跳过
+      final all = <BlockNode>[];
+      for (var i = 0; i < parseData.chunks.length; i++) {
+        all.addAll(parseData.parsedChunkAt(i));
+      }
+      return all;
+    }
+    return RenderParseCache.shortPost(post).nodes;
   }
 
   String _segmentKey(_PostRenderSegment segment) {
@@ -635,7 +789,16 @@ class _TopicPostListState extends State<TopicPostList> {
       final longPostCache = _longPostDataFor(post);
       newEngineData = longPostCache.newEngineData;
       longChunks = longPostCache.chunks;
-      final useLongSegments = longChunks.isNotEmpty;
+      // discourse-assign 等插件的指定/取消指定系统帖,cooked 里塞几十个
+      // emoji <img> 就很容易超过长帖分段阈值——这条 chunk 化直出路径是
+      // topic_post_list.dart 自己直接调 LongPostHeaderSegment/Footer,完全
+      // 绕过 PostItem.build() 里"是不是系统操作帖"的判断,系统帖一旦被
+      // 判成"长帖"就会被当成能点赞/回复的普通帖子整个渲染出来。系统帖
+      // 永远走 shortPost(内部再分流到 SmallActionItem),不参与长帖分段。
+      final bool isSystemActionPost =
+          post.postType == PostTypes.smallAction ||
+          (post.actionCode?.isNotEmpty ?? false);
+      final useLongSegments = !isSystemActionPost && longChunks.isNotEmpty;
 
       postIndexToScrollIndex[postIndex] = segments.length;
       postNumberToIndex[post.postNumber] = postIndex;
@@ -822,7 +985,7 @@ class _TopicPostListState extends State<TopicPostList> {
     final generation = ++_parseWarmUpGeneration;
     var index = 0;
     void step() {
-      SchedulerBinding.instance.scheduleTask(() {
+      scheduleIdleTask(() {
         if (!mounted || generation != _parseWarmUpGeneration) return;
         if (ScrollBusySignal.isBusy) {
           _parseWarmUpRetry?.cancel();
@@ -841,7 +1004,7 @@ class _TopicPostListState extends State<TopicPostList> {
           break;
         }
         if (index < posts.length) step();
-      }, Priority.idle);
+      });
     }
 
     step();
@@ -931,7 +1094,13 @@ class _TopicPostListState extends State<TopicPostList> {
     // 不再包系统 SelectionArea:正文选区全部由 FluxdoRender 自研选区承担
     // (含未登录场景 —— toolbar 降级只留「复制」)。header/footer 等普通
     // Widget 不创建系统选区节点,省掉手势竞技场竞争与 registrar 树维护。
-    return NotificationListener<ScrollNotification>(
+    //
+    // QuoteImageScope:图片长按菜单的「引用」handler 在 tap 时刻就近现取
+    // (flatten 产物进全局缓存后,callbacks 闭包里的冻结引用可能指向已
+    // 销毁页面的 State,见 QuoteImageScope 文档)。
+    return QuoteImageScope(
+      handler: widget.onQuoteImage,
+      child: NotificationListener<ScrollNotification>(
       onNotification: _handleScrollNotification,
       child: Listener(
         behavior: HitTestBehavior.translucent,
@@ -1139,6 +1308,17 @@ class _TopicPostListState extends State<TopicPostList> {
                   return const SliverToBoxAdapter(child: SizedBox.shrink());
                 },
               ),
+
+            // 帖子流末尾的推荐区(相关话题 / 建议话题),对齐网页版
+            // more-topics:只在已加载到话题末尾时出现
+            if (!hasMoreAfter)
+              SliverToBoxAdapter(
+                child: _wrapContent(
+                  context,
+                  MoreTopicsSection(detail: detail),
+                ),
+              ),
+
             SliverPadding(
               padding: EdgeInsets.only(
                 bottom: 80 + MediaQuery.of(context).padding.bottom,
@@ -1151,6 +1331,7 @@ class _TopicPostListState extends State<TopicPostList> {
           ],
         ),
       ),
+    ),
     );
   }
 
@@ -1209,6 +1390,16 @@ class _TopicPostListState extends State<TopicPostList> {
     final Widget? opSlot = (post.postNumber == 1 && detail.sharedIssueVisible)
         ? SharedIssueButton(topic: detail, onChanged: onSharedIssueChanged)
         : null;
+    // 问答话题:「N 个回答」头部渲染在第一个答案上方(问题帖紧邻其后
+    // 的那一帖;仅问题帖已加载时才有可见的问题/答案分界)。挂在该帖
+    // 首个段(shortPost 或长帖 header)顶部。
+    final bool showAnswerHeader =
+        detail.isPostVoting &&
+        post.postNumber != 1 &&
+        postIndex > 0 &&
+        posts_[postIndex - 1].postNumber == 1 &&
+        (segment.type == _PostRenderSegmentType.shortPost ||
+            segment.type == _PostRenderSegmentType.longHeader);
     final Widget child;
 
     switch (segment.type) {
@@ -1242,6 +1433,8 @@ class _TopicPostListState extends State<TopicPostList> {
           onQuoteImage: onQuoteImage,
           onExpandHiddenPost: onExpandHiddenPost,
           useReplyDialog: useReplyDialog,
+          assignmentInfo: detail.indirectlyAssignedTo[post.id],
+          canAssignPost: widget.canAssignPost,
           topicTitle: detail.title,
           isPrivateMessageTopic: detail.isPrivateMessage,
           isPmWithNonHumanUser: detail.pmWithNonHumanUser,
@@ -1249,6 +1442,8 @@ class _TopicPostListState extends State<TopicPostList> {
               ? () => widget.onShowPostDetail!(post)
               : null,
           opTopSlot: opSlot,
+          isPostVotingTopic: detail.isPostVoting,
+          topicClosed: detail.closed || detail.archived,
         );
 
         // OP 楼的 opSlot 依赖整个 detail 对象,签名无法稳定,不缓存
@@ -1277,6 +1472,8 @@ class _TopicPostListState extends State<TopicPostList> {
           pmNonHuman: detail.pmWithNonHumanUser,
           canShareAsImage: onShareAsImage != null,
           canShowDetail: widget.onShowPostDetail != null,
+          isPostVoting: detail.isPostVoting,
+          topicClosed: detail.closed || detail.archived,
         );
         final cached = _shortPostCache[post.id];
         if (cached != null && cached.signature == signature) {
@@ -1310,12 +1507,17 @@ class _TopicPostListState extends State<TopicPostList> {
         // widget 实例让框架整棵短路。单帖更新(点赞等)触发的整页
         // rebuild 里,正文富文本的重建是最大头,这里短路后更新只剩
         // header/footer 的轻量重建。
+        // 首 chunk 额外携带弹幕层(读 post.boosts/boostUsername),必须
+        // 连 post 实例一起比对 —— 否则新 boost 到达后弹幕拿的还是旧数据。
         final chunkKey = (post.id, ci);
         final cachedChunk = _chunkWidgetCache[chunkKey];
         if (cachedChunk != null &&
             identical(cachedChunk.data, data) &&
             cachedChunk.selected == isSelectedPost &&
-            cachedChunk.highlight == highlight) {
+            cachedChunk.highlight == highlight &&
+            (ci != 0 ||
+                (identical(cachedChunk.post, post) &&
+                    cachedChunk.boostUsername == boostUsername))) {
           child = cachedChunk.widget;
           break;
         }
@@ -1333,11 +1535,15 @@ class _TopicPostListState extends State<TopicPostList> {
           footnotesHtml: data.footnotesHtml,
           callbacks: data.callbacks,
           onQuoteSelection: onQuoteSelection,
+          highlightBoostUsername: ci == 0 ? boostUsername : null,
+          topicTitle: detail.title,
         );
         _chunkWidgetCache[chunkKey] = _ChunkWidgetCacheEntry(
           data: data,
+          post: post,
           selected: isSelectedPost,
           highlight: highlight,
+          boostUsername: boostUsername,
           widget: child,
         );
         break;
@@ -1371,6 +1577,8 @@ class _TopicPostListState extends State<TopicPostList> {
               ? () => widget.onShowPostDetail!(post)
               : null,
           opTopSlot: opSlot,
+          isPostVotingTopic: detail.isPostVoting,
+          topicClosed: detail.closed || detail.archived,
         );
         break;
       case _PostRenderSegmentType.gapBefore:
@@ -1389,6 +1597,14 @@ class _TopicPostListState extends State<TopicPostList> {
         break;
     }
 
+    // TOC 锚点作用域只挂 1 楼:节点 id 跨帖重复,其他楼的标题不能进
+    // 注册表(见 HeadingAnchorRegistrar/headingAnchorKey)。
+    final anchorRegistry = widget.headingAnchorRegistry;
+    final scopedChild =
+        anchorRegistry != null && segment.post.postNumber == 1
+            ? HeadingAnchorScope(registry: anchorRegistry, child: child)
+            : child;
+
     final wrapped = _wrapContent(
       context,
       AutoScrollTag(
@@ -1399,7 +1615,21 @@ class _TopicPostListState extends State<TopicPostList> {
         // 常驻 DecoratedBoxTransition 包装(项目不用包的 highlight 功能,
         // 楼层高亮是 PostItem 自己的 highlight 参数),每帖少一层
         // transition + tween 求值
-        builder: (context, animation) => child,
+        builder: (context, animation) => showAnswerHeader
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  PostVotingAnswerHeader(
+                    // 答案数 = 总帖数 - 1(减问题帖,官方同口径)
+                    answerCount: (detail.postsCount - 1).clamp(0, 999999),
+                    isActivityMode: widget.isActivitySort,
+                    onSortChanged: (byActivity) =>
+                        widget.onAnswerSortChanged?.call(byActivity),
+                  ),
+                  scopedChild,
+                ],
+              )
+            : scopedChild,
       ),
     );
 
@@ -1428,14 +1658,20 @@ class _ShortPostCacheEntry {
 /// 长帖正文 chunk 段的实例缓存条目
 class _ChunkWidgetCacheEntry {
   final NewEngineLongPostData data;
+
+  /// 首 chunk 弹幕层读 post.boosts,post 实例参与缓存签名
+  final Post post;
   final bool selected;
   final bool highlight;
+  final String? boostUsername;
   final Widget widget;
 
   const _ChunkWidgetCacheEntry({
     required this.data,
+    required this.post,
     required this.selected,
     required this.highlight,
+    required this.boostUsername,
     required this.widget,
   });
 }

@@ -8,6 +8,7 @@ import '../models/pending_post.dart';
 import '../models/user.dart';
 import '../services/preloaded_data_service.dart';
 import '../widgets/common/anchor_guard_sliver.dart';
+import 'bookmark_sync_controller.dart';
 import 'core_providers.dart';
 import 'message_bus/models.dart';
 
@@ -44,6 +45,19 @@ class TopicDetailNotifier extends AsyncNotifier<TopicDetail> {
   TopicDetailNotifier(this.arg);
   final TopicDetailParams arg;
 
+  /// 活跃实例注册表:topicId → 该话题当前存活的 provider 参数(后注册在后)。
+  ///
+  /// 页面实例的 params 携带 UUID instanceId,深层组件(帖脚的 boost/
+  /// reaction 本地操作落地)只知道 topicId —— 直接 new 一个空 instanceId
+  /// 的 params 与页面实例不相等,只会凭空创建并 fetch 一个孤儿实例,
+  /// 更新永远落不到在显示的那份数据上。经注册表找回真实实例。
+  static final Map<int, List<TopicDetailParams>> _activeParams = {};
+
+  /// 该话题最近激活的 provider 参数(同话题叠开多页时取最上层);无活跃
+  /// 实例(如个人页等无话题上下文)返回 null,调用方自行跳过同步。
+  static TopicDetailParams? activeParamsFor(int topicId) =>
+      _activeParams[topicId]?.lastOrNull;
+
   bool _hasMoreAfter = true;
   bool _hasMoreBefore = true;
 
@@ -65,6 +79,12 @@ class TopicDetailNotifier extends AsyncNotifier<TopicDetail> {
   bool get _isLoadPreviousFailed => loadPreviousFailedListenable.value;
   set _isLoadPreviousFailed(bool v) => loadPreviousFailedListenable.value = v;
 
+  /// 推荐话题缓存(对齐网页版 post-stream `_setSuggestedTopics`:响应没带
+  /// 这两组就保留旧值)。服务端只在"帖子流已到末尾"的请求里下发,过滤模式
+  /// 切换、跳楼层重载都拿不到 —— 不缓存的话底部推荐会莫名其妙消失。
+  List<Topic> _cachedSuggestedTopics = const [];
+  List<Topic> _cachedRelatedTopics = const [];
+
   String? _filter;  // 当前过滤模式（如 'summary' 表示热门回复）
   String? _usernameFilter;  // 当前用户名过滤（如只看题主）
   bool _filterTopLevelReplies = false;  // 只看顶层回复
@@ -79,7 +99,11 @@ class TopicDetailNotifier extends AsyncNotifier<TopicDetail> {
   bool get isLoadMoreFailed => _isLoadMoreFailed;
   bool get isLoadPreviousFailed => _isLoadPreviousFailed;
   bool get isSummaryMode => _filter == 'summary';
+  bool get isActivityMode => _filter == 'activity';
   bool get isAuthorOnlyMode => _usernameFilter != null;
+  /// 当前按用户过滤的用户名(null = 未启用)。isAuthorOnlyMode 历史上
+  /// 只用于楼主,现已泛化为任意参与者,靠这个字段区分过滤对象。
+  String? get usernameFilter => _usernameFilter;
   bool get isTopLevelMode => _filterTopLevelReplies;
   bool get _isFilteredMode => _filter != null || _usernameFilter != null || _filterTopLevelReplies;
 
@@ -101,6 +125,25 @@ class TopicDetailNotifier extends AsyncNotifier<TopicDetail> {
     final lastPostId = posts.last.id;
     final lastIndex = stream.indexOf(lastPostId);
     _hasMoreAfter = lastIndex != -1 && lastIndex < stream.length - 1;
+  }
+
+  /// 用缓存补齐详情里的推荐话题(新响应带了就刷新缓存,没带就回填)
+  TopicDetail _withSuggestedCache(TopicDetail detail) {
+    if (detail.suggestedTopics.isNotEmpty) {
+      _cachedSuggestedTopics = detail.suggestedTopics;
+    }
+    if (detail.relatedTopics.isNotEmpty) {
+      _cachedRelatedTopics = detail.relatedTopics;
+    }
+    final needSuggested =
+        detail.suggestedTopics.isEmpty && _cachedSuggestedTopics.isNotEmpty;
+    final needRelated =
+        detail.relatedTopics.isEmpty && _cachedRelatedTopics.isNotEmpty;
+    if (!needSuggested && !needRelated) return detail;
+    return detail.copyWith(
+      suggestedTopics: needSuggested ? _cachedSuggestedTopics : null,
+      relatedTopics: needRelated ? _cachedRelatedTopics : null,
+    );
   }
 
   /// 更新单个帖子的辅助方法
@@ -136,6 +179,18 @@ class TopicDetailNotifier extends AsyncNotifier<TopicDetail> {
   Future<TopicDetail> build() async {
     debugPrint('[TopicDetailNotifier] build called with topicId=${arg.topicId}, postNumber=${arg.postNumber}');
 
+    // 注册活跃实例(见 _activeParams);autoDispose 时反注册。
+    // build 重跑(refresh)会重复进入,先去重再追加保持"最近激活在尾"。
+    final registered = _activeParams.putIfAbsent(arg.topicId, () => []);
+    registered.remove(arg);
+    registered.add(arg);
+    ref.onDispose(() {
+      final list = _activeParams[arg.topicId];
+      if (list == null) return;
+      list.remove(arg);
+      if (list.isEmpty) _activeParams.remove(arg.topicId);
+    });
+
     // 保持存活，防止布局切换的短暂间隙被 autoDispose 清理
     // 使用 onCancel/onResume 模式：最后一个 watcher 移除后才开始倒计时
     final link = ref.keepAlive();
@@ -161,13 +216,52 @@ class TopicDetailNotifier extends AsyncNotifier<TopicDetail> {
 
     _updateBoundaryState(detail.postStream.posts, detail.postStream.stream);
 
-    return detail;
+    return _withSuggestedCache(detail);
   }
 }
 
 final topicDetailProvider = AsyncNotifierProvider.family.autoDispose<TopicDetailNotifier, TopicDetail, TopicDetailParams>(
   TopicDetailNotifier.new,
 );
+
+/// 话题内「只看某用户」请求(用户卡片/头像长按菜单发起,话题详情页消费)。
+///
+/// 发起方是深层弹层组件,不持有页面 State,没法直接调页面的过滤 action
+/// (那里除了改 notifier 还要做整套 UI 复位:退出嵌套视图/跳 1 楼/切换
+/// spinner)。经此桥广播,由当前活跃的详情页实例 ref.listen 消费。
+/// [username] 为 null 表示取消过滤;[seq] 单调递增,保证连续两次相同
+/// 请求也能触发 listener。
+class TopicUserFilterRequest {
+  final int seq;
+  final int topicId;
+  final String? username;
+
+  const TopicUserFilterRequest({
+    required this.seq,
+    required this.topicId,
+    this.username,
+  });
+}
+
+class TopicUserFilterRequestNotifier extends Notifier<TopicUserFilterRequest?> {
+  int _seq = 0;
+
+  @override
+  TopicUserFilterRequest? build() => null;
+
+  void request({required int topicId, String? username}) {
+    state = TopicUserFilterRequest(
+      seq: ++_seq,
+      topicId: topicId,
+      username: username,
+    );
+  }
+}
+
+final topicUserFilterRequestProvider =
+    NotifierProvider<TopicUserFilterRequestNotifier, TopicUserFilterRequest?>(
+      TopicUserFilterRequestNotifier.new,
+    );
 
 /// 话题 AI 摘要 Provider
 final topicSummaryProvider = StreamProvider.autoDispose

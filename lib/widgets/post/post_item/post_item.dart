@@ -5,21 +5,27 @@ import 'package:fluxdo_render/fluxdo_render.dart';
 import '../../../models/topic.dart';
 import '../../../l10n/s.dart';
 import '../../../providers/preferences_provider.dart';
+import '../../../providers/topic_session_provider.dart';
 import '../../../services/toast_service.dart';
 import '../../../utils/blocked_user_filter.dart';
 import '../../../utils/code_selection_context.dart';
 import '../../../utils/fluxdo_render_callbacks.dart';
 import '../../../utils/frame_jank_monitor.dart';
 import '../../common/perf_span_box.dart';
+import '../post_boost/boost_actions.dart';
 import '../post_boost/boost_danmaku.dart';
 import '../post_signature_block.dart';
 import '../small_action_item.dart';
+import '../../crypto/crypto_decrypt_sheet.dart';
+import '../../topic/assign_sheet.dart';
 import 'quote_selection_helper.dart';
+import '../../../../services/crypto/crypto_cipher_format.dart';
 import 'render_parse_cache.dart';
 import 'widgets/post_footer_section/post_footer_section.dart';
 import 'widgets/post_header_section.dart';
 import 'widgets/post_notice_widget.dart';
 import 'widgets/post_segment_frame.dart';
+import 'widgets/post_voting_control.dart';
 
 class PostItem extends ConsumerStatefulWidget {
   final Post post;
@@ -58,6 +64,20 @@ class PostItem extends ConsumerStatefulWidget {
   /// OP 帖专属插槽: 仅在 postNumber == 1 时生效, 透传给 PostFooterSection
   final Widget? opTopSlot;
 
+  /// 帖子级指定(discourse-assign 插件 indirectly_assigned_to)信息,
+  /// 非 null 时在正文下方/签名上方显示"已指定给 X"标签。
+  final PostAssignmentInfo? assignmentInfo;
+
+  /// 当前用户是否有指定权限(discourse-assign can_assign)——控制
+  /// "更多"菜单里"指定帖子"这一项是否显示。
+  final bool canAssignPost;
+
+  /// post-voting(问答)话题:footer 显示赞成/反对控件与评论区
+  final bool isPostVotingTopic;
+
+  /// 话题 closed/archived(问答投票禁投判定)
+  final bool topicClosed;
+
   const PostItem({
     super.key,
     required this.post,
@@ -89,6 +109,10 @@ class PostItem extends ConsumerStatefulWidget {
     this.onShowPostDetail,
     this.hideRepliesButton = false,
     this.opTopSlot,
+    this.assignmentInfo,
+    this.canAssignPost = false,
+    this.isPostVotingTopic = false,
+    this.topicClosed = false,
   });
 
   @override
@@ -98,11 +122,6 @@ class PostItem extends ConsumerStatefulWidget {
 class _PostItemState extends ConsumerState<PostItem> {
   _ShortPostNewEngineRenderData? _newEngineRenderData;
   late bool _acceptedAnswer;
-  final GlobalKey<PostFooterSectionState> _footerKey =
-      GlobalKey<PostFooterSectionState>();
-
-  /// 帖子级临时关闭弹幕。null = 跟随全局偏好；false = 临时关
-  bool? _danmakuOverride;
 
   @override
   void initState() {
@@ -144,6 +163,27 @@ class _PostItemState extends ConsumerState<PostItem> {
     );
   }
 
+  /// 问答话题:正文左侧挂竖排投票列(官方 .post-voting-post 形态,
+  /// 上箭头/票数/下箭头一列,正文右移让位);普通话题原样返回。
+  Widget _withVotingColumn(Post post, Widget body) {
+    if (!widget.isPostVotingTopic) return body;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: PostVotingControl(
+            post: post,
+            topicId: widget.topicId,
+            topicClosed: widget.topicClosed,
+            axis: Axis.vertical,
+          ),
+        ),
+        Expanded(child: body),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final post = widget.post;
@@ -155,8 +195,21 @@ class _PostItemState extends ConsumerState<PostItem> {
       '${(post.cooked.length / 1000).toStringAsFixed(1)}k',
     );
 
-    if (post.postType == PostTypes.smallAction) {
-      return SmallActionItem(post: post, selected: widget.selected);
+    // discourse-assign 的指定/取消指定系统帖:SiteSetting.assigns_public
+    // 关闭时插件把这些帖子建成 whisper(post_type=4)而不是 small_action
+    // (post_type=3)——只按 post_type 判断会漏掉这部分,它们就会落到下面
+    // 正常帖子的渲染分支,带点赞/回复/更多按钮,而这些系统帖压根不支持
+    // 这些互动,点了就出错。action_code 才是 Discourse 真正用来标记"这是
+    // 系统生成的操作记录帖"的字段,不管 post_type 是 3 还是 4 都会带上,
+    // 普通用户帖永远不会有这个字段——用它兜底判断更准。
+    if (post.postType == PostTypes.smallAction ||
+        (post.actionCode?.isNotEmpty ?? false)) {
+      return SmallActionItem(
+        post: post,
+        topicId: widget.topicId,
+        selected: widget.selected,
+        onEdit: widget.onEdit,
+      );
     }
 
     final danmakuPref = ref.watch(
@@ -170,7 +223,14 @@ class _PostItemState extends ConsumerState<PostItem> {
       blockedUsernames,
     );
     final hasBoosts = visibleBoosts.isNotEmpty;
-    final danmakuActive = danmakuPref && (_danmakuOverride ?? true);
+    // 帖级临时关闭在会话层(topicSessionProvider):长帖分段与短帖共享,
+    // 且不随 sliver 回收丢失
+    final danmakuOff = ref.watch(
+      topicSessionProvider(
+        widget.topicId,
+      ).select((s) => s.danmakuOffPostIds.contains(post.id)),
+    );
+    final danmakuActive = danmakuPref && !danmakuOff;
     final showDanmaku = danmakuActive && hasBoosts;
     // 仅当全局开关开启且有 boost 时，才展示帖子级 toggle 按钮
     final showDanmakuToggle = danmakuPref && hasBoosts;
@@ -214,9 +274,9 @@ class _PostItemState extends ConsumerState<PostItem> {
               onMentionUser: widget.onMentionUser,
               danmakuActive: showDanmakuToggle ? showDanmaku : null,
               onToggleDanmaku: showDanmakuToggle
-                  ? () => setState(() {
-                      _danmakuOverride = !showDanmaku;
-                    })
+                  ? () => ref
+                        .read(topicSessionProvider(widget.topicId).notifier)
+                        .setDanmakuOff(post.id, showDanmaku)
                   : null,
             ),
             const SizedBox(height: 12),
@@ -240,7 +300,9 @@ class _PostItemState extends ConsumerState<PostItem> {
               padding: isModeratorAction
                   ? const EdgeInsets.all(12)
                   : EdgeInsets.zero,
-              child: Stack(
+              child: _withVotingColumn(
+                post,
+                Stack(
                 clipBehavior: Clip.none,
                 children: [
                   ConstrainedBox(
@@ -288,6 +350,18 @@ class _PostItemState extends ConsumerState<PostItem> {
                             onCopyToast: () => ToastService.showSuccess(
                               context.l10n.common_copiedToClipboard,
                             ),
+                            // 划词「解密」:选中文本命中密文特征时 toolbar 显示,
+                            // 打开加解密工具箱解密面板(ENC1/OpenSSL/编码)。
+                            onDecryptRequest: (plainText) =>
+                                showCryptoDecryptSheet(
+                              context: context,
+                              initialCiphertext: plainText,
+                              onQuoteReply: widget.onQuoteSelection == null
+                                  ? null
+                                  : (plaintext) => widget
+                                      .onQuoteSelection!(plaintext, post),
+                            ),
+                            decryptTextDetector: isDecryptableText,
                           );
                         },
                       ),
@@ -302,16 +376,29 @@ class _PostItemState extends ConsumerState<PostItem> {
                         trackHeight: danmakuTrackHeight,
                         highlightUsername: widget.highlightBoostUsername,
                         onBoostTap: (boost, anchorRect) {
-                          _footerKey.currentState?.showBoostActions(
-                            boost,
+                          BoostActions.show(
+                            context: context,
+                            ref: ref,
+                            post: post,
+                            topicId: widget.topicId,
+                            boost: boost,
                             anchorRect: anchorRect,
+                            topicTitle: widget.topicTitle,
                           );
                         },
                       ),
                     ),
                 ],
               ),
+              ),
             ),
+            // 帖子级指定标签("已指定给 X"):正文下方、签名上方,
+            // 跟官方 Web 端位置一致。点开是编辑/取消的小菜单。
+            if (widget.assignmentInfo != null)
+              _PostAssignmentBadge(
+                info: widget.assignmentInfo!,
+                topicId: widget.topicId,
+              ),
             // 用户签名
             if (PostSignatureBlock.shouldRender(
               ref,
@@ -354,9 +441,7 @@ class _PostItemState extends ConsumerState<PostItem> {
                 ),
               ),
             PostFooterSection(
-              key: _footerKey,
               post: post,
-              forceShowBoostList: _danmakuOverride == false,
               danmakuActive: showDanmakuToggle ? showDanmaku : null,
               topicId: widget.topicId,
               topicHasAcceptedAnswer: widget.topicHasAcceptedAnswer,
@@ -376,6 +461,18 @@ class _PostItemState extends ConsumerState<PostItem> {
               onShowPostDetail: widget.onShowPostDetail,
               hideRepliesButton: widget.hideRepliesButton,
               opTopSlot: widget.opTopSlot,
+              canAssignPost:
+                  widget.canAssignPost && widget.assignmentInfo == null,
+              onAssignPost: () => showPostAssignDialog(
+                context,
+                ref,
+                topicId: widget.topicId,
+                postId: post.id,
+              ),
+              isPostVotingTopic: widget.isPostVotingTopic,
+              topicClosed: widget.topicClosed,
+              // 短帖正文左侧已有竖排投票列,footer 不再放横排胶囊
+              showVotingControl: false,
               onAcceptedAnswerChanged: (accepted) {
                 if (!mounted) return;
                 setState(() {
@@ -403,4 +500,85 @@ class _ShortPostNewEngineRenderData {
     required this.parsedNodes,
     required this.callbacks,
   });
+}
+
+/// "已指定给 X"标签(帖子级)——点开是编辑/取消的小菜单,对齐官方
+/// Web 端"正文下方、签名上方"的位置和交互。
+class _PostAssignmentBadge extends ConsumerWidget {
+  const _PostAssignmentBadge({required this.info, required this.topicId});
+
+  final PostAssignmentInfo info;
+  final int topicId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => showPostAssignDialog(
+          context,
+          ref,
+          topicId: topicId,
+          postId: info.postId,
+          current: info,
+        ),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.assignment_ind_rounded,
+                size: 16,
+                color: theme.colorScheme.primary,
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  '已指定给 ${info.displayName}',
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              PopupMenuButton<String>(
+                padding: EdgeInsets.zero,
+                icon: Icon(
+                  Icons.more_vert_rounded,
+                  size: 16,
+                  color: theme.colorScheme.primary,
+                ),
+                onSelected: (value) {
+                  if (value == 'edit') {
+                    showPostAssignDialog(
+                      context,
+                      ref,
+                      topicId: topicId,
+                      postId: info.postId,
+                      current: info,
+                    );
+                  } else if (value == 'cancel') {
+                    unassignPost(ref, topicId: topicId, postId: info.postId);
+                  }
+                },
+                itemBuilder: (context) => const [
+                  PopupMenuItem(value: 'edit', child: Text('编辑指定')),
+                  PopupMenuItem(value: 'cancel', child: Text('取消指定')),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

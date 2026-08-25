@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:app_icons/app_icons.dart';
 import 'package:visibility_detector/visibility_detector.dart';
+import 'package:m3e_ui/m3e_ui.dart';
 import '../../../../services/discourse_cache_manager.dart';
+import '../../../../services/image_decode_spec_memo.dart';
 import '../../../../utils/url_helper.dart';
 import '../image_utils.dart';
 import '../../lazy_load_scope.dart';
 import 'image_carousel_builder.dart';
+import '../../../common/hero_image.dart';
 
 /// 构建 Discourse 图片网格 (d-image-grid)
 /// 支持 grid 和 carousel 两种模式
@@ -165,6 +168,10 @@ class _GridImageTileState extends State<_GridImageTile> {
 
   String get _cacheKey => 'grid_tile_${widget.heroTag}';
 
+  /// 源端展示方式:瓦片是 cover 裁切 + 圆角 4。一处给出,同时约束源端
+  /// 与 openViewer 两侧参数(见 ViewerSourceStyle)。
+  static const _gridStyle = ViewerSourceStyle.cover(radius: 4);
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -260,18 +267,23 @@ class _GridImageTileState extends State<_GridImageTile> {
     final maxSide =
         widget.columnWidth > displayHeight ? widget.columnWidth : displayHeight;
     final cachePx = (maxSide * dpr).round();
+    // 登记解码参数:查看器缩略图占位同参重建 → 同 key 命中缓存
+    ImageDecodeSpecMemo.remember(displayUrl, cachePx, cachePx);
     return SizedBox(
       width: widget.columnWidth,
       height: displayHeight,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: GestureDetector(
+        // HeroImage 统一件:源端隐藏/占位/飞行起点/裁切插值都由它保证;
+        // _gridStyle 同时约束 openViewer 侧参数(见 ViewerSourceStyle)
+        child: HeroImage(
+          heroTag: widget.heroTag,
+          style: _gridStyle,
+          flightImage: discourseImageProvider(displayUrl),
           onTap: () => _openViewer(context, fullUrl),
-          child: Hero(
-            tag: widget.heroTag,
-            // RepaintBoundary:加载 spinner 动画/首绘隔离在格子内,
-            // 不连带整个帖子 segment 每帧重绘
-            child: RepaintBoundary(
+          // RepaintBoundary:加载 spinner 动画/首绘隔离在格子内,
+          // 不连带整个帖子 segment 每帧重绘
+          child: RepaintBoundary(
               child: Image(
                 image: ResizeImage(
                   discourseImageProvider(displayUrl),
@@ -285,21 +297,21 @@ class _GridImageTileState extends State<_GridImageTile> {
                 gaplessPlayback: true,
                 loadingBuilder: (context, child, loadingProgress) {
                   if (loadingProgress == null) return child;
+                  final total = loadingProgress.expectedTotalBytes;
+                  // 无总长 = 不定态用 LoadingSpinner;有进度走 wavy 圆环
                   return Container(
                     color: widget.theme.colorScheme.surfaceContainerHighest,
                     child: Center(
                       child: RepaintBoundary(
-                        child: SizedBox(
-                          width: 24,
-                          height: 24,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            value: loadingProgress.expectedTotalBytes != null
-                                ? loadingProgress.cumulativeBytesLoaded /
-                                    loadingProgress.expectedTotalBytes!
-                                : null,
-                          ),
-                        ),
+                        child: total != null
+                            ? M3eCircularProgress(
+                                value:
+                                    loadingProgress.cumulativeBytesLoaded /
+                                        total,
+                                size: 24,
+                                strokeWidth: 2,
+                              )
+                            : const LoadingSpinner(size: 24),
                       ),
                     ),
                   );
@@ -316,7 +328,6 @@ class _GridImageTileState extends State<_GridImageTile> {
               ),
             ),
           ),
-        ),
       ),
     );
   }
@@ -341,6 +352,10 @@ class _GridImageTileState extends State<_GridImageTile> {
       heroTags: widget.heroTags,
       initialIndex: widget.index >= 0 ? widget.index : 0,
       filenames: widget.filenames,
+      // 与源端同源:_gridStyle 一处给出,两侧不可能不一致
+      heroSourceFit: _gridStyle.openViewerArgs.fit,
+      heroSourceRadius: _gridStyle.openViewerArgs.radius,
+      heroSourceCircular: _gridStyle.openViewerArgs.circular,
     );
   }
 
@@ -353,11 +368,7 @@ class _GridImageTileState extends State<_GridImageTile> {
         child: Container(
           color: widget.theme.colorScheme.surfaceContainerHighest,
           child: const Center(
-            child: SizedBox(
-              width: 24,
-              height: 24,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
+            child: LoadingSpinner(size: 24),
           ),
         ),
       ),

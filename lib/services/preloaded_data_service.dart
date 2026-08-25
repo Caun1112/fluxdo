@@ -12,7 +12,10 @@ import 'cf_challenge_service.dart';
 import 'cf_clearance_refresh_service.dart';
 
 /// 预加载数据服务
-/// 从首页 HTML 的 data-preloaded 属性中提取数据，避免额外 API 请求
+/// 从首页 HTML 中提取 Discourse 预加载数据，避免额外 API 请求。
+/// 新版站点为 `<script type="application/json" id="data-preloaded">` 标签
+/// （内容是原始 JSON），旧版为元素属性 `data-preloaded="..."`（HTML 实体转义），
+/// 两种形态都支持。
 class PreloadedDataService {
   static final PreloadedDataService _instance =
       PreloadedDataService._internal();
@@ -295,6 +298,24 @@ class PreloadedDataService {
     return raw.split('|').map(int.tryParse).whereType<int>().toList();
   }
 
+  // ---- discourse-assign 插件开关（均为 client:true，preload 可读）----
+
+  /// 指定功能总开关(assign_enabled)。站点未装插件时该键不存在,
+  /// 视为未启用——入口显隐以「assignEnabled && can_assign」为准。
+  bool get assignEnabled => _siteSettings?['assign_enabled'] == true;
+
+  /// 指定状态字段开关(enable_assign_status)。关闭时官方 Web 端弹窗
+  /// 不显示状态下拉。
+  bool get assignStatusEnabled =>
+      _siteSettings?['enable_assign_status'] == true;
+
+  /// 指定状态可选值(assign_statuses,竖线分隔;首项为默认状态)。
+  List<String> get assignStatuses {
+    final raw = _siteSettings?['assign_statuses'] as String?;
+    if (raw == null || raw.isEmpty) return const [];
+    return raw.split('|').where((s) => s.isNotEmpty).toList();
+  }
+
   /// 获取可用的回应表情列表
   Future<List<String>> getEnabledReactions() async {
     await _ensureLoaded();
@@ -501,12 +522,22 @@ class PreloadedDataService {
         AppConstants.baseUrl,
         options: Options(
           headers: {'Accept': 'text/html'},
-          extra: {if (AppConstants.skipCsrfForHomeRequest) 'skipCsrf': true},
+          extra: {
+            if (AppConstants.skipCsrfForHomeRequest) 'skipCsrf': true,
+            // 诊断标注:首页 HTML 是 CF 盾高发路径,日志里需可辨识
+            'requestTag': 'preload-home',
+          },
         ),
       );
 
       final html = response.data as String;
-      await _parsePreloadedDataFromHtml(html);
+      final parsed = await _parsePreloadedDataFromHtml(html);
+      if (!parsed) {
+        // 解析失败不可标记成功:置 _loaded 会让所有消费方拿到空数据并
+        // 静默降级到接口兜底(站点改版时曾无声潜伏)。抛错让调用方走
+        // BrowserTrustCoordinator 的降级链(启动 WebView 补水/重试)。
+        throw const FormatException('首页 HTML 未解析出 data-preloaded 数据');
+      }
       debugPrint('[PreloadedData] 数据加载成功');
       _loaded = true;
       // 预热完成后仅更新站点基础数据和 sitekey。cf_clearance 自动续期
@@ -519,7 +550,7 @@ class PreloadedDataService {
     }
   }
 
-  /// 从 HTML 中解析 data-preloaded 属性
+  /// 从 HTML 中解析预加载数据（兼容新旧两种形态）
   Future<bool> _parsePreloadedDataFromHtml(String html) async {
     _extractCsrfTokenFromHtml(html);
     _extractSharedSessionKeyFromHtml(html);
@@ -527,15 +558,31 @@ class PreloadedDataService {
     _extractBaseUriFromHtml(html);
     _extractCdnUrlFromHtml(html);
     _extractPluginCandidatesInBackground(html);
-    // 提取 data-preloaded 属性内容
-    final match = RegExp(r'data-preloaded="([^"]*)"').firstMatch(html);
-    if (match == null) {
-      debugPrint('[PreloadedData] 未找到 data-preloaded 属性');
-      return false;
+
+    // 新版形态：<script type="application/json" id="data-preloaded">{...}</script>
+    // 内容是原始 JSON，不做 HTML 实体解码（否则正文中字面的 &quot; 会被误还原）
+    final scriptTag = RegExp(
+      '''<script[^>]*id=["']data-preloaded["'][^>]*>''',
+      caseSensitive: false,
+    ).firstMatch(html);
+    if (scriptTag != null) {
+      final start = scriptTag.end;
+      final end = html.indexOf('</script>', start);
+      if (end > start) {
+        return _parsePreloadedDataString(
+          html.substring(start, end),
+          htmlEntityEncoded: false,
+        );
+      }
     }
 
-    // HTML entity 解码已移入 Isolate 中统一处理
-    return _parsePreloadedDataString(match.group(1)!);
+    // 旧版形态：元素属性 data-preloaded="..."（HTML 实体转义，Isolate 中解码）
+    final match = RegExp(r'data-preloaded="([^"]*)"').firstMatch(html);
+    if (match == null) {
+      debugPrint('[PreloadedData] 未找到 data-preloaded 数据');
+      return false;
+    }
+    return _parsePreloadedDataString(match.group(1)!, htmlEntityEncoded: true);
   }
 
   void _extractCsrfTokenFromHtml(String html) {
@@ -672,13 +719,18 @@ class PreloadedDataService {
   }
 
   /// 解析预加载数据字符串
-  Future<bool> _parsePreloadedDataString(String dataString) async {
+  ///
+  /// [htmlEntityEncoded] 为 true 时（旧版属性形态）先做 HTML 实体解码。
+  Future<bool> _parsePreloadedDataString(
+    String dataString, {
+    required bool htmlEntityEncoded,
+  }) async {
     try {
-      // 在 Isolate 中完成 HTML entity 解码 + 外层/内层 JSON 解码
-      final preloaded = await compute(
-        _decodePreloadedJsonInIsolate,
+      // 在 Isolate 中完成（可选的）HTML entity 解码 + 外层/内层 JSON 解码
+      final preloaded = await compute(_decodePreloadedJsonInIsolate, [
         dataString,
-      );
+        if (htmlEntityEncoded) 'entity',
+      ]);
       if (preloaded == null) {
         debugPrint('[PreloadedData] 预加载 JSON 解析为空');
         return false;
@@ -893,14 +945,19 @@ List<Map<String, dynamic>>? _decodeTopicTrackingStatesInIsolate(
   return decoded.cast<Map<String, dynamic>>();
 }
 
-Map<String, dynamic>? _decodePreloadedJsonInIsolate(String rawJson) {
-  // HTML entity 解码
-  final unescaped = rawJson
-      .replaceAll('&quot;', '"')
-      .replaceAll('&amp;', '&')
-      .replaceAll('&lt;', '<')
-      .replaceAll('&gt;', '>')
-      .replaceAll('&#39;', "'");
+Map<String, dynamic>? _decodePreloadedJsonInIsolate(List<String> input) {
+  final rawJson = input[0];
+  final htmlEntityEncoded = input.length > 1 && input[1] == 'entity';
+
+  // 旧版属性形态需要 HTML entity 解码；新版 script 标签形态是原始 JSON
+  final unescaped = htmlEntityEncoded
+      ? rawJson
+            .replaceAll('&quot;', '"')
+            .replaceAll('&amp;', '&')
+            .replaceAll('&lt;', '<')
+            .replaceAll('&gt;', '>')
+            .replaceAll('&#39;', "'")
+      : rawJson;
 
   final decoded = jsonDecode(unescaped);
   final Map<String, dynamic> result;

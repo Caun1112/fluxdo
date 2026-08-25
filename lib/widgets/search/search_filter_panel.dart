@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:m3e_ui/m3e_ui.dart';
 import '../../l10n/s.dart';
 import '../../models/category.dart';
 import '../../models/search_filter.dart';
 import '../../providers/category_provider.dart';
+import '../../theme/theme_resolver.dart';
 import '../../utils/dialog_utils.dart';
 import '../../utils/font_awesome_helper.dart';
 import '../../utils/tag_icon_list.dart';
@@ -169,7 +171,7 @@ class _SearchFilterPanelState extends ConsumerState<SearchFilterPanel> {
 
     return Container(
       decoration: BoxDecoration(
-        color: colorScheme.surface,
+        color: colorScheme.overlaySurface,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Column(
@@ -341,7 +343,7 @@ class _SearchFilterPanelState extends ConsumerState<SearchFilterPanel> {
                     );
                   },
                   loading: () =>
-                      const Center(child: CircularProgressIndicator()),
+                      const Center(child: LoadingSpinner()),
                   error: (e, _) => Text(context.l10n.search_tagsLoadFailed('$e')),
                 ),
               ],

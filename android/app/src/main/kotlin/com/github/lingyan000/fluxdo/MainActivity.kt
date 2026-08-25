@@ -17,6 +17,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.CookieManager as WebCookieManager
 import android.webkit.WebView
 import androidx.webkit.CookieManagerCompat
@@ -92,8 +93,15 @@ class MainActivity : FlutterActivity() {
         super.onDestroy()
     }
 
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        FairMemoryReceiver.detachEngine(flutterEngine)
+        super.cleanUpFlutterEngine(flutterEngine)
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // 公平内存预警 → Dart 标准 memoryPressure 的转发依赖 engine 引用
+        FairMemoryReceiver.attachEngine(flutterEngine)
         // 媒体转码通道(音视频压缩到 4MB:media3 Transformer 硬编)
         MediaTranscodeChannel.register(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
@@ -122,6 +130,21 @@ class MainActivity : FlutterActivity() {
                     } else {
                         result.error("INVALID_URL", "URL is null", null)
                     }
+                }
+                // 展示登录二维码期间置 FLAG_SECURE:防截屏/录屏/最近任务缩略图
+                "setSecureScreen" -> {
+                    val secure = call.argument<Boolean>("secure") ?: false
+                    runOnUiThread {
+                        if (secure) {
+                            window.setFlags(
+                                WindowManager.LayoutParams.FLAG_SECURE,
+                                WindowManager.LayoutParams.FLAG_SECURE,
+                            )
+                        } else {
+                            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                        }
+                    }
+                    result.success(true)
                 }
                 else -> result.notImplemented()
             }

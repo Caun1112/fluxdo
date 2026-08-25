@@ -881,7 +881,9 @@ mixin _AuthMixin on _DiscourseServiceBase {
             'skipSessionStateSync': true,
             'skipWebViewAdapter': true,
             AppCookieManager.skipCookieManagerExtraKey: true,
-            SelfHealingInterceptor.selfHealedExtraKey: true,
+            // 候选会话探测带手工 Cookie 头,绝不能被恢复层重放:
+            // 重放会清掉这个手工头,让探测失去意义。
+            FluxRequestKeys.noRecovery: true,
           },
         ),
       );
@@ -990,7 +992,7 @@ mixin _AuthMixin on _DiscourseServiceBase {
         },
         onResponse: (response, handler) async {
           final skipAuthCheck =
-              response.requestOptions.extra['skipAuthCheck'] == true;
+              response.requestOptions.spec.skipAuthCheck;
 
           final loggedOut = response.headers.value('discourse-logged-out');
           if (!skipAuthCheck &&
@@ -1012,7 +1014,7 @@ mixin _AuthMixin on _DiscourseServiceBase {
           }
 
           final skipSessionStateSync =
-              response.requestOptions.extra['skipSessionStateSync'] == true;
+              response.requestOptions.spec.skipSessionStateSync;
           if (!skipSessionStateSync) {
             final sessionState = await _syncSessionStateFromResponse(
               response.requestOptions,
@@ -1041,7 +1043,7 @@ mixin _AuthMixin on _DiscourseServiceBase {
         },
         onError: (error, handler) async {
           final skipAuthCheck =
-              error.requestOptions.extra['skipAuthCheck'] == true;
+              error.requestOptions.spec.skipAuthCheck;
           final data = error.response?.data;
           debugPrint('[DIO] Error: ${error.response?.statusCode}');
 
@@ -1086,7 +1088,7 @@ mixin _AuthMixin on _DiscourseServiceBase {
           }
 
           final skipSessionStateSync =
-              error.requestOptions.extra['skipSessionStateSync'] == true;
+              error.requestOptions.spec.skipSessionStateSync;
           final sessionState = skipSessionStateSync
               ? await _readSessionCookieState()
               : await _syncSessionStateFromResponse(
@@ -1382,6 +1384,32 @@ mixin _AuthMixin on _DiscourseServiceBase {
     if (_isLoggingOut) return;
     _isLoggingOut = true;
 
+    // ===== 第零步：尝试 User API Key 静默恢复 =====
+    // 已授权 key（one_time_password scope）时先换新 OTP 重建会话，
+    // 成功则本次失效对用户完全透明，不登出不打扰。
+    // selfHeal 内部有单飞合流与失败冷却窗口，不会形成恢复风暴。
+    try {
+      final restoredUser = await UserApiKeyService().selfHeal(_dio);
+      final restoredUsername = restoredUser?['username']?.toString();
+      if (restoredUsername != null && restoredUsername.isNotEmpty) {
+        await finalizeNativeLoginSuccess(restoredUsername);
+        LogWriter.instance.write({
+          'timestamp': DateTime.now().toIso8601String(),
+          'level': 'info',
+          'type': 'auth',
+          'event': 'auth_restored_by_user_api_key',
+          'message': '登录失效已通过 User API Key 自动恢复，取消登出',
+          'source': source,
+          'trigger': triggerInfo,
+        });
+        _resetStrikes();
+        _isLoggingOut = false;
+        return;
+      }
+    } catch (e) {
+      debugPrint('[Auth] User API Key 自动恢复异常: $e');
+    }
+
     // ===== 第一步：立即切断所有在途请求 =====
     // 先于 logout 执行，防止用户在失效状态下继续操作产生更多 403
     AuthSession().advance();
@@ -1535,6 +1563,38 @@ mixin _AuthMixin on _DiscourseServiceBase {
     await _storage.write(key: DiscourseService._usernameKey, value: username);
   }
 
+  /// 登出 API 调用的总超时。
+  ///
+  /// 撤销 User API Key + DELETE /session 两个请求合计。超时即放弃服务端
+  /// 撤销、继续清本地——绝不让网络把登出 UI 卡住。
+  static const Duration _logoutApiTimeout = Duration(seconds: 8);
+
+  /// 登出后预加载刷新的超时。它只是为下一个匿名会话预热,不必久等。
+  static const Duration _preloadRefreshTimeout = Duration(seconds: 10);
+
+  /// 登出的服务端调用:撤销自愈凭证 + 删除会话。
+  Future<void> _performLogoutApiCalls() async {
+    // 显式登出:自愈凭证一并撤销,防止之后被自愈机制"复活"会话
+    await UserApiKeyService().revokeAndClear(_dio);
+
+    final usernameForLogout =
+        _username ?? await _storage.read(key: DiscourseService._usernameKey);
+    if (usernameForLogout == null || usernameForLogout.isEmpty) return;
+
+    try {
+      await _dio.delete(
+        '/session/$usernameForLogout',
+        options: Options(
+          // 登出不该产生"会话失效"信号(它本来就是要失效)。
+          // 自愈的豁免在策略侧按端点判定,见 SessionSelfHealPolicy。
+          extra: const {FluxRequestKeys.skipAuthCheck: true},
+        ),
+      );
+    } catch (e) {
+      debugPrint('[DiscourseService] Logout API failed: $e');
+    }
+  }
+
   /// 登出
   Future<void> logout({bool callApi = true, bool refreshPreload = true}) async {
     // ===== 第一步：切断所有旧请求 =====
@@ -1542,57 +1602,92 @@ mixin _AuthMixin on _DiscourseServiceBase {
 
     // ===== 第二步：主动停止后台 Service =====
     MessageBusService().stopAll();
-    CfClearanceRefreshService().stop();
+    unawaited(CfClearanceRefreshService().stop());
     WebViewAdapterSettingsService.instance.resetSessionFallback();
     CfChallengeService().resetSessionCompatibilityDecision();
+    // 被拒 cf_clearance 墓碑随登录会话失效，一并清空
+    CfClearanceRegistry.instance.reset();
 
     // ===== 第三步：调用登出 API（可选，用新的 generation） =====
+    //
+    // 整段带超时兜底:登出是用户的明确意图,本地状态清理(第四步起)绝不能
+    // 被网络卡住。服务端会话没撤销掉是可接受的降级——本地凭证清干净后,
+    // 那个会话也无法再被这台设备使用。
     if (callApi) {
-      // 显式登出:自愈凭证一并撤销,防止之后被自愈机制"复活"会话
-      await UserApiKeyService().revokeAndClear(_dio);
-      final usernameForLogout =
-          _username ?? await _storage.read(key: DiscourseService._usernameKey);
       try {
-        if (usernameForLogout != null && usernameForLogout.isNotEmpty) {
-          await _dio.delete('/session/$usernameForLogout');
-        }
-      } catch (e) {
-        debugPrint('[DiscourseService] Logout API failed: $e');
+        await _performLogoutApiCalls().timeout(_logoutApiTimeout);
+      } on TimeoutException {
+        debugPrint(
+          '[DiscourseService] 登出 API 超时 '
+          '(${_logoutApiTimeout.inSeconds}s),继续清理本地状态',
+        );
+        LogWriter.instance.write({
+          'timestamp': DateTime.now().toIso8601String(),
+          'level': 'warning',
+          'type': 'auth',
+          'event': 'logout_api_timeout',
+          'message': '登出 API 超时，已跳过并继续清理本地状态',
+          'timeoutSeconds': _logoutApiTimeout.inSeconds,
+        });
       }
     }
 
     // ===== 第四步：清除内存状态 =====
-    _clearPreviousTTokenFallback();
-    _tToken = null;
-    _username = null;
-    _cachedUserSummary = null;
-    _cachedUserSummaryUsername = null;
-    _userSummaryCacheTime = null;
-    await _storage.delete(key: DiscourseService._usernameKey);
-    _credentialsLoaded = false;
-    // bootstrap 成功态是「进程 × 登录会话」级(浏览器语义:每页面加载一次),
-    // 换账号 = 新浏览器会话,这里复位让下一个会话重新跑一次。
-    WebViewSessionCookieRefreshService.instance.resetSessionState();
+    //
+    // 第四~六步用 try/finally 包住:凭证已经清掉、状态广播却没发出去是最坏
+    // 的中间态(UI 仍以为在登录中)。secure storage 写入与 cookie 清理都是
+    // 平台通道调用,理论上可能抛,那时也必须把广播补上。
+    try {
+      _clearPreviousTTokenFallback();
+      _tToken = null;
+      _username = null;
+      _cachedUserSummary = null;
+      _cachedUserSummaryUsername = null;
+      _userSummaryCacheTime = null;
+      await _storage.delete(key: DiscourseService._usernameKey);
+      _credentialsLoaded = false;
+      // bootstrap 成功态是「进程 × 登录会话」级(浏览器语义:每页面加载一次),
+      // 换账号 = 新浏览器会话,这里复位让下一个会话重新跑一次。
+      WebViewSessionCookieRefreshService.instance.resetSessionState();
 
-    // ===== 第五步：清除 Cookie（保留 cf_clearance）=====
-    await _cookieSync.reset();
-    final cfClearanceCookie = await _cookieJar.getCfClearanceCookie();
-    await _cookieJar.clearAll();
-    if (cfClearanceCookie != null) {
-      await _cookieJar.restoreCfClearance(cfClearanceCookie);
+      // ===== 第五步：清除 Cookie（保留 cf_clearance）=====
+      await _cookieSync.reset();
+      final cfClearanceCookie = await _cookieJar.getCfClearanceCookie();
+      await _cookieJar.clearAll();
+      if (cfClearanceCookie != null) {
+        await _cookieJar.restoreCfClearance(cfClearanceCookie);
+      }
+
+      // ===== 第六步：刷新预加载数据（确保新状态就绪后再广播）=====
+      //
+      // 尽力而为:这一步是为下一个匿名会话预热站点数据,不是登出的必要条件。
+      // 它发 GET / 拉首页 HTML,可能撞 CF 盾、被限流、或解析失败抛
+      // FormatException —— 任何一种都不该让登出流程中断。
+      PreloadedDataService().reset();
+      if (refreshPreload) {
+        try {
+          await PreloadedDataService().refresh().timeout(
+            _preloadRefreshTimeout,
+          );
+        } catch (e) {
+          debugPrint('[DiscourseService] 登出后预加载刷新失败(忽略): $e');
+          LogWriter.instance.write({
+            'timestamp': DateTime.now().toIso8601String(),
+            'level': 'warning',
+            'type': 'auth',
+            'event': 'logout_preload_refresh_failed',
+            'message': '登出后预加载刷新失败，已忽略并继续',
+            'error': e.toString(),
+          });
+        }
+      }
+    } finally {
+      // ===== 第七步：广播状态变更（无论前面是否出错都必须执行）=====
+      currentUserNotifier.value = null;
+      _authStateController.add(null);
+
+      // ===== 第八步：重置 auth strike 状态 =====
+      _resetStrikes();
     }
-
-    // ===== 第六步：刷新预加载数据（确保新状态就绪后再广播）=====
-    PreloadedDataService().reset();
-    if (refreshPreload) {
-      await PreloadedDataService().refresh();
-    }
-
-    // ===== 第七步：广播状态变更（此时一切已就绪）=====
-    currentUserNotifier.value = null;
-    _authStateController.add(null);
-
-    // ===== 第八步：重置 auth strike 状态 =====
-    _resetStrikes();
   }
 }

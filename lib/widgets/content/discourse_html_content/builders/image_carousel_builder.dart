@@ -1,10 +1,19 @@
+import 'dart:async' show unawaited;
 import 'dart:math' as math;
+import 'dart:ui' show PointerDeviceKind;
 
 import 'package:flutter/material.dart';
 import 'package:app_icons/app_icons.dart';
+import 'package:m3e_ui/m3e_ui.dart';
 import '../../../../services/discourse_cache_manager.dart';
+import '../../../../services/image_decode_spec_memo.dart';
+import '../../../common/hero_image.dart';
 import '../image_utils.dart';
 import 'image_grid_builder.dart';
+
+/// 轮播单页的展示方式:contain 完整展示(圆角属于轨道 ClipRRect,不是单图)。
+/// 一处给出,同时约束源端与 openViewer 两侧参数(见 ViewerSourceStyle)。
+const _slideStyle = ViewerSourceStyle.contain();
 
 /// 构建 Discourse 图片轮播 (d-image-grid mode=carousel)
 Widget buildImageCarousel({
@@ -118,13 +127,14 @@ class _ImageCarouselState extends State<_ImageCarousel> {
 
   /// 预加载当前页 ± _preloadRange 的图片到磁盘缓存
   void _preloadAdjacent(int centerIndex) {
-    final cacheManager = DiscourseCacheManager();
     final start = math.max(0, centerIndex - _preloadRange);
     final end = math.min(widget.images.length - 1, centerIndex + _preloadRange);
     for (int i = start; i <= end; i++) {
       final url = _resolvedUrls[i];
       if (url != null) {
-        cacheManager.preloadImage(url);
+        unawaited(
+          BlobImageCache.precache(BlobImageCache.contentBucket, url),
+        );
       }
     }
   }
@@ -176,6 +186,11 @@ class _ImageCarouselState extends State<_ImageCarousel> {
       heroTags: heroTags,
       initialIndex: globalIndex >= 0 ? globalIndex : 0,
       filenames: widget.galleryInfo.filenames,
+      // 与源端同源:contain 源的 fit 为 null(传了会让飞行体做多余的
+      // cover→contain 窗口插值),圆角/圆形也一并由 style 给出
+      heroSourceFit: _slideStyle.openViewerArgs.fit,
+      heroSourceRadius: _slideStyle.openViewerArgs.radius,
+      heroSourceCircular: _slideStyle.openViewerArgs.circular,
     );
   }
 
@@ -197,22 +212,34 @@ class _ImageCarouselState extends State<_ImageCarousel> {
                     color: widget.theme.colorScheme.surfaceContainerHighest,
                   ),
                 ),
-                // PageView
-                PageView.builder(
-                  controller: _pageController,
-                  itemCount: widget.images.length,
-                  onPageChanged: _onPageChanged,
-                  itemBuilder: (context, index) {
-                    return _CarouselSlide(
-                      index: index,
-                      resolvedUrl: _resolvedUrls[index],
-                      imageData: widget.images[index],
-                      galleryInfo: widget.galleryInfo,
-                      carouselHeight: _carouselHeight,
-                      theme: widget.theme,
-                      onTap: _openViewer,
-                    );
-                  },
+                // PageView(桌面端补鼠标/触控板拖拽:默认 ScrollBehavior
+                // 的 dragDevices 不含 mouse,鼠标按住拖没反应)
+                ScrollConfiguration(
+                  behavior: ScrollConfiguration.of(context).copyWith(
+                    scrollbars: false,
+                    dragDevices: {
+                      PointerDeviceKind.touch,
+                      PointerDeviceKind.mouse,
+                      PointerDeviceKind.trackpad,
+                      PointerDeviceKind.stylus,
+                    },
+                  ),
+                  child: PageView.builder(
+                    controller: _pageController,
+                    itemCount: widget.images.length,
+                    onPageChanged: _onPageChanged,
+                    itemBuilder: (context, index) {
+                      return _CarouselSlide(
+                        index: index,
+                        resolvedUrl: _resolvedUrls[index],
+                        imageData: widget.images[index],
+                        galleryInfo: widget.galleryInfo,
+                        carouselHeight: _carouselHeight,
+                        theme: widget.theme,
+                        onTap: _openViewer,
+                      );
+                    },
+                  ),
                 ),
                 // 导航按钮（仅多张图片时显示）
                 if (!_isSingle) ...[
@@ -300,6 +327,7 @@ class _CarouselSlideState extends State<_CarouselSlide>
   @override
   bool get wantKeepAlive => true;
 
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -308,11 +336,7 @@ class _CarouselSlideState extends State<_CarouselSlide>
     if (url == null) {
       // URL 还在解析中
       return const Center(
-        child: SizedBox(
-          width: 24,
-          height: 24,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
+        child: LoadingSpinner(size: 24),
       );
     }
 
@@ -324,45 +348,92 @@ class _CarouselSlideState extends State<_CarouselSlide>
         ? heroTags[globalIndex]
         : 'carousel_${widget.imageData.src.hashCode}';
 
-    // 限制解码尺寸：轮播高度 300 * dpr，避免解码超大原图
+    // 解码尺寸双向 cap(decode-time ResizeImage,engine 下采样,全格式
+    // 生效)。不要走 CachedNetworkImageProvider 的 maxWidth/maxHeight ——
+    // 那是 flutter_cache_manager 的 resize 路径:webp 不在
+    // supportedFileNames 里直接原图返回(等于没约束);jpg/png 则解码后
+    // PNG 重编码再写第二份磁盘缓存,首次加载反而多付几百 ms。
     final dpr = MediaQuery.devicePixelRatioOf(context);
-    final maxHeight = (widget.carouselHeight * dpr).toInt();
+    final cacheWidth = (MediaQuery.sizeOf(context).width * dpr).round();
+    final cacheHeight = (widget.carouselHeight * dpr).round();
+    // 登记解码参数:查看器缩略图占位同参重建 → 同 key 命中缓存
+    ImageDecodeSpecMemo.remember(url, cacheWidth, cacheHeight);
 
-    return GestureDetector(
+    final aspect = _imageAspect;
+
+    // HeroImage 统一件:盒子收拢、飞行起点、源端隐藏/占位都由它保证;
+    // _slideStyle 同时约束 openViewer 侧参数(见 ViewerSourceStyle)。
+    //
+    // aspectRatio 是关键:轮播的 Image 原本 width:infinity,Hero 盒子会等于
+    // 整条槽位(实测 768x300 槽位里画面仅 300x300),于是尾帧铺满槽位、
+    // Hero 撤走才缩成小图 —— 两段突变。按图片真实比例收拢后盒子 ≡ 画面。
+    // 宽高缺失时 aspect 为 null,退回铺满槽位(无从得知比例)。
+    return HeroImage(
+      heroTag: heroTag,
+      style: _slideStyle,
+      aspectRatio: aspect,
+      flightImage: discourseImageProvider(url),
       onTap: () => widget.onTap(context, widget.index, url),
-      child: Hero(
-        tag: heroTag,
-        child: Image(
-          image: discourseImageProvider(url, maxHeight: maxHeight),
-          fit: BoxFit.contain,
-          width: double.infinity,
-          height: widget.carouselHeight,
-          loadingBuilder: (context, child, loadingProgress) {
-            if (loadingProgress == null) return child;
-            return Center(
-              child: SizedBox(
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  value: loadingProgress.expectedTotalBytes != null
-                      ? loadingProgress.cumulativeBytesLoaded /
-                          loadingProgress.expectedTotalBytes!
-                      : null,
-                ),
-              ),
-            );
-          },
-          errorBuilder: (context, error, stackTrace) {
-            return Center(
-              child: Icon(
-                Symbols.broken_image_rounded,
-                color: widget.theme.colorScheme.outline,
-              ),
-            );
-          },
-        ),
+      child: _buildImage(
+        url,
+        cacheWidth,
+        cacheHeight,
+        fillSlot: aspect == null,
       ),
+    );
+  }
+
+  /// 图片原始宽高比;宽高缺失或非法时返回 null(退回旧结构)
+  double? get _imageAspect {
+    final w = widget.imageData.width;
+    final h = widget.imageData.height;
+    if (w == null || h == null || w <= 0 || h <= 0) return null;
+    return w / h;
+  }
+
+
+  Widget _buildImage(
+    String url,
+    int cacheWidth,
+    int cacheHeight, {
+    required bool fillSlot,
+  }) {
+    return Image(
+      image: ResizeImage(
+        discourseImageProvider(url),
+        width: cacheWidth,
+        height: cacheHeight,
+        policy: ResizeImagePolicy.fit,
+      ),
+      // 盒子已由 AspectRatio 收成图片比例,此时 contain 与 fill 等效。
+      // 但**必须用 contain**:AspectRatio 用的是 <img> 声明的宽高,而
+      // Discourse 那个值偶尔与实际文件不符 —— 用 fill 会拉伸变形,
+      // contain 顶多留一点白。宁可留白也不要变形。
+      fit: BoxFit.contain,
+      width: fillSlot ? double.infinity : null,
+      height: fillSlot ? widget.carouselHeight : null,
+      loadingBuilder: (context, child, loadingProgress) {
+        if (loadingProgress == null) return child;
+        final total = loadingProgress.expectedTotalBytes;
+        // 无总长 = 不定态用 LoadingSpinner;有进度走 wavy 圆环
+        return Center(
+          child: total != null
+              ? M3eCircularProgress(
+                  value: loadingProgress.cumulativeBytesLoaded / total,
+                  size: 24,
+                  strokeWidth: 2,
+                )
+              : const LoadingSpinner(size: 24),
+        );
+      },
+      errorBuilder: (context, error, stackTrace) {
+        return Center(
+          child: Icon(
+            Symbols.broken_image_rounded,
+            color: widget.theme.colorScheme.outline,
+          ),
+        );
+      },
     );
   }
 }

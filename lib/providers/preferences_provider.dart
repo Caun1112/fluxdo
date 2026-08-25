@@ -60,7 +60,8 @@ enum ProgressGestureAction {
   aiAssistant,
   readingSettings,
   search,
-  refresh;
+  refresh,
+  goBack;
 
   static ProgressGestureAction fromString(String? value) {
     return ProgressGestureAction.values.firstWhere(
@@ -146,6 +147,12 @@ class AppPreferences {
   /// 竖屏锁定
   final bool portraitLock;
 
+  /// 全屏侧滑返回(页面任意位置右滑,默认仅屏幕左缘)
+  final bool fullscreenSwipeBack;
+
+  /// Android 首页单次返回直接退出；关闭时需在 2 秒内返回两次
+  final bool exitOnSingleBack;
+
   /// 滚动时收起顶栏和底栏
   final bool hideBarOnScroll;
 
@@ -164,11 +171,31 @@ class AppPreferences {
   /// 富文本编辑器(实验性,自研 WYSIWYG composer)
   final bool useRichComposer;
 
+  /// 回车插软换行(`<br>`)而非新建段落。
+  ///
+  /// 默认开:对齐 Discourse 网页版 composer —— 那边回车就是软换行,
+  /// 单个换行 cook 成 `<p>a<br>b</p>`(紧凑);我们此前每次回车都新建块,
+  /// 序列化时块间隔一个空行,cook 成两个 `<p>`,行距明显比别人大。
+  /// 关掉则回车新建段落,Shift+回车软换行(两者互换)。
+  final bool composerEnterSoftBreak;
+
+  /// 即时渲染(ir):光标处显示 Markdown 格式符并可直接编辑;关闭为纯所见即所得
+  final bool composerLiveRender;
+
   /// 发帖前 AI 审核
   final bool aiPostReviewEnabled;
 
   /// 发帖前 AI 审核使用的模型 key（providerId:modelId）
   final String? aiPostReviewModelKey;
+
+  /// AI 翻译功能开关。关闭时帖子菜单不显示翻译入口。
+  final bool aiTranslationEnabled;
+
+  /// AI 翻译目标语言。null 表示跟随应用语言。
+  final String? aiTranslationTargetLanguage;
+
+  /// AI 翻译使用的模型 key（providerId:modelId）。
+  final String? aiTranslationModelKey;
 
   /// hcaptcha 验证 POST endpoint 覆盖。null = 用内置 fallback 列表 (尝试
   /// `/captcha/hcaptcha/create.json` → `/hcaptcha/create.json`)。
@@ -178,13 +205,25 @@ class AppPreferences {
   /// 对话框背景高斯模糊
   final bool dialogBlur;
 
+  /// 加解密工具箱：记住最近使用的加密密码（存系统安全存储）
+  final bool cryptoRememberPassword;
+
+  /// 加解密工具箱：最近使用的算法 id 列表（最近在前，最多 6 条）
+  final List<String> cryptoRecentAlgorithms;
+
   /// 显示用户签名。默认关闭:签名在网页本就是 opt-in 功能
   /// (signatures_visible_by_default 默认 false,需用户主动开启),
   /// 且第三方签名图成本高、良莠不齐,默认关对齐网页更稳妥。
   final bool showSignatures;
 
+  /// 小尾巴动画 SVG 自适应帧率
+  final bool adaptiveSignatureFrameRate;
+
   /// Boost 弹幕化（默认关闭）
   final bool boostDanmaku;
+
+  /// 帖子流末尾显示推荐话题（相关话题 / 建议话题），默认开启，对齐网页版
+  final bool showSuggestedTopics;
 
   /// 默认使用树形视图
   final bool defaultNestedView;
@@ -212,6 +251,15 @@ class AppPreferences {
 
   /// 底栏入口 id 列表（顺序即显示顺序）
   final List<String> bottomNavIds;
+
+  /// 底栏：无字模式（仅手机底栏，只显示图标、隐藏文字标签）
+  final bool bottomNavLabelless;
+
+  /// 底栏：悬浮底栏（仅手机底栏，宽度随入口数量自适应的悬浮胶囊）
+  final bool bottomNavFloating;
+
+  /// 底栏：悬浮胶囊毛玻璃模糊（仅悬浮底栏开启时生效）
+  final bool bottomNavFloatingBlur;
 
   /// Android 屏幕刷新率偏好（0 = auto/跟随系统，其它为目标刷新率，如 60 / 90 / 120）
   final int displayModeRefreshRate;
@@ -260,18 +308,29 @@ class AppPreferences {
     this.blockedUsernames = const [],
     required this.crashlytics,
     required this.portraitLock,
+    required this.fullscreenSwipeBack,
+    required this.exitOnSingleBack,
     required this.hideBarOnScroll,
     required this.clearCacheOnExit,
     required this.autoCfChallenge,
     required this.expandRelatedLinks,
     required this.aiSwipeEntry,
     this.useRichComposer = false,
+    this.composerEnterSoftBreak = true,
+    this.composerLiveRender = false,
     this.aiPostReviewEnabled = false,
     this.aiPostReviewModelKey,
+    this.aiTranslationEnabled = false,
+    this.aiTranslationTargetLanguage,
+    this.aiTranslationModelKey,
     this.hcaptchaCreateEndpoint,
     required this.dialogBlur,
+    required this.cryptoRememberPassword,
+    required this.cryptoRecentAlgorithms,
     this.showSignatures = false,
+    this.adaptiveSignatureFrameRate = true,
     this.boostDanmaku = false,
+    this.showSuggestedTopics = true,
     this.defaultNestedView = false,
     this.nestedLineStyle = NestedLineStyle.auto,
     this.bookmarksOpenMode = BookmarksOpenMode.defaultRoute,
@@ -281,6 +340,9 @@ class AppPreferences {
     required this.bottomSingleTapAction,
     required this.bottomDoubleTapAction,
     required this.bottomNavIds,
+    this.bottomNavLabelless = false,
+    this.bottomNavFloating = false,
+    this.bottomNavFloatingBlur = false,
     this.displayModeRefreshRate = 0,
     this.progressGesturesEnabled = true,
     this.progressGestureSwipeLeft = ProgressGestureAction.nextPost,
@@ -312,18 +374,29 @@ class AppPreferences {
     List<String>? blockedUsernames,
     bool? crashlytics,
     bool? portraitLock,
+    bool? fullscreenSwipeBack,
+    bool? exitOnSingleBack,
     bool? hideBarOnScroll,
     bool? clearCacheOnExit,
     bool? autoCfChallenge,
     bool? expandRelatedLinks,
     bool? aiSwipeEntry,
     bool? useRichComposer,
+    bool? composerEnterSoftBreak,
+    bool? composerLiveRender,
     bool? aiPostReviewEnabled,
     Object? aiPostReviewModelKey = _unset,
+    bool? aiTranslationEnabled,
+    Object? aiTranslationTargetLanguage = _unset,
+    Object? aiTranslationModelKey = _unset,
     Object? hcaptchaCreateEndpoint = _unset,
     bool? dialogBlur,
+    bool? cryptoRememberPassword,
+    List<String>? cryptoRecentAlgorithms,
     bool? showSignatures,
+    bool? adaptiveSignatureFrameRate,
     bool? boostDanmaku,
+    bool? showSuggestedTopics,
     bool? defaultNestedView,
     NestedLineStyle? nestedLineStyle,
     BookmarksOpenMode? bookmarksOpenMode,
@@ -333,6 +406,9 @@ class AppPreferences {
     NavTapAction? bottomSingleTapAction,
     NavTapAction? bottomDoubleTapAction,
     List<String>? bottomNavIds,
+    bool? bottomNavLabelless,
+    bool? bottomNavFloating,
+    bool? bottomNavFloatingBlur,
     int? displayModeRefreshRate,
     bool? progressGesturesEnabled,
     ProgressGestureAction? progressGestureSwipeLeft,
@@ -366,22 +442,41 @@ class AppPreferences {
       blockedUsernames: blockedUsernames ?? this.blockedUsernames,
       crashlytics: crashlytics ?? this.crashlytics,
       portraitLock: portraitLock ?? this.portraitLock,
+      fullscreenSwipeBack: fullscreenSwipeBack ?? this.fullscreenSwipeBack,
+      exitOnSingleBack: exitOnSingleBack ?? this.exitOnSingleBack,
       hideBarOnScroll: hideBarOnScroll ?? this.hideBarOnScroll,
       clearCacheOnExit: clearCacheOnExit ?? this.clearCacheOnExit,
       autoCfChallenge: autoCfChallenge ?? this.autoCfChallenge,
       expandRelatedLinks: expandRelatedLinks ?? this.expandRelatedLinks,
       aiSwipeEntry: aiSwipeEntry ?? this.aiSwipeEntry,
       useRichComposer: useRichComposer ?? this.useRichComposer,
+      composerEnterSoftBreak:
+          composerEnterSoftBreak ?? this.composerEnterSoftBreak,
+      composerLiveRender: composerLiveRender ?? this.composerLiveRender,
       aiPostReviewEnabled: aiPostReviewEnabled ?? this.aiPostReviewEnabled,
       aiPostReviewModelKey: identical(aiPostReviewModelKey, _unset)
           ? this.aiPostReviewModelKey
           : aiPostReviewModelKey as String?,
+      aiTranslationEnabled:
+          aiTranslationEnabled ?? this.aiTranslationEnabled,
+      aiTranslationTargetLanguage:
+          identical(aiTranslationTargetLanguage, _unset)
+          ? this.aiTranslationTargetLanguage
+          : aiTranslationTargetLanguage as String?,
+      aiTranslationModelKey: identical(aiTranslationModelKey, _unset)
+          ? this.aiTranslationModelKey
+          : aiTranslationModelKey as String?,
       hcaptchaCreateEndpoint: identical(hcaptchaCreateEndpoint, _unset)
           ? this.hcaptchaCreateEndpoint
           : hcaptchaCreateEndpoint as String?,
       dialogBlur: dialogBlur ?? this.dialogBlur,
+      cryptoRememberPassword: cryptoRememberPassword ?? this.cryptoRememberPassword,
+      cryptoRecentAlgorithms: cryptoRecentAlgorithms ?? this.cryptoRecentAlgorithms,
       showSignatures: showSignatures ?? this.showSignatures,
+      adaptiveSignatureFrameRate:
+          adaptiveSignatureFrameRate ?? this.adaptiveSignatureFrameRate,
       boostDanmaku: boostDanmaku ?? this.boostDanmaku,
+      showSuggestedTopics: showSuggestedTopics ?? this.showSuggestedTopics,
       defaultNestedView: defaultNestedView ?? this.defaultNestedView,
       nestedLineStyle: nestedLineStyle ?? this.nestedLineStyle,
       bookmarksOpenMode: bookmarksOpenMode ?? this.bookmarksOpenMode,
@@ -393,6 +488,10 @@ class AppPreferences {
       bottomDoubleTapAction:
           bottomDoubleTapAction ?? this.bottomDoubleTapAction,
       bottomNavIds: bottomNavIds ?? this.bottomNavIds,
+      bottomNavLabelless: bottomNavLabelless ?? this.bottomNavLabelless,
+      bottomNavFloating: bottomNavFloating ?? this.bottomNavFloating,
+      bottomNavFloatingBlur:
+          bottomNavFloatingBlur ?? this.bottomNavFloatingBlur,
       displayModeRefreshRate:
           displayModeRefreshRate ?? this.displayModeRefreshRate,
       progressGesturesEnabled:
@@ -437,19 +536,33 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   static const String _blockedUsernamesKey = 'pref_blocked_usernames';
   static const String _crashlyticsKey = 'pref_crashlytics';
   static const String _portraitLockKey = 'pref_portrait_lock';
+  static const String _fullscreenSwipeBackKey = 'pref_fullscreen_swipe_back';
+  static const String _exitOnSingleBackKey = 'pref_exit_on_single_back';
   static const String _hideBarOnScrollKey = 'pref_hide_bar_on_scroll';
   static const String _clearCacheOnExitKey = 'pref_clear_cache_on_exit';
   static const String _autoCfChallengeKey = 'pref_auto_cf_challenge';
   static const String _expandRelatedLinksKey = 'pref_expand_related_links';
   static const String _aiSwipeEntryKey = 'pref_ai_swipe_entry';
   static const String _useRichComposerKey = 'pref_use_rich_composer';
+  static const String _composerEnterSoftBreakKey =
+      'pref_composer_enter_soft_break';
+  static const String _composerLiveRenderKey = 'pref_composer_live_render';
   static const String _aiPostReviewEnabledKey = 'pref_ai_post_review_enabled';
   static const String _aiPostReviewModelPrefKey = 'pref_ai_post_review_model';
+  static const String _aiTranslationEnabledKey = 'pref_ai_translation_enabled';
+  static const String _aiTranslationTargetLanguageKey =
+      'pref_ai_translation_target_language';
+  static const String _aiTranslationModelPrefKey = 'pref_ai_translation_model';
   static const String _hcaptchaCreateEndpointKey =
       'pref_hcaptcha_create_endpoint';
   static const String _dialogBlurKey = 'pref_dialog_blur';
+  static const String _cryptoRememberPasswordKey = 'pref_crypto_remember_password';
+  static const String _cryptoRecentAlgorithmsKey = 'pref_crypto_recent_algorithms';
   static const String _showSignaturesKey = 'pref_show_signatures';
+  static const String _adaptiveSignatureFrameRateKey =
+      'pref_adaptive_signature_frame_rate';
   static const String _boostDanmakuKey = 'pref_boost_danmaku';
+  static const String _showSuggestedTopicsKey = 'pref_show_suggested_topics';
   static const String _defaultNestedViewKey = 'pref_default_nested_view';
   static const String _nestedLineStyleKey = 'pref_nested_line_style';
   static const String _bookmarksOpenModeKey = 'pref_bookmarks_open_mode';
@@ -461,6 +574,10 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   static const String _bottomDoubleTapActionKey =
       'pref_bottom_double_tap_action';
   static const String _bottomNavIdsKey = 'pref_bottom_nav_ids';
+  static const String _bottomNavLabellessKey = 'pref_bottom_nav_labelless';
+  static const String _bottomNavFloatingKey = 'pref_bottom_nav_floating';
+  static const String _bottomNavFloatingBlurKey =
+      'pref_bottom_nav_floating_blur';
   static const String _displayModeRefreshRateKey =
       'pref_display_mode_refresh_rate';
   static const String _progressGesturesEnabledKey =
@@ -511,18 +628,37 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
               _prefs.getStringList(_blockedUsernamesKey) ?? const [],
           crashlytics: _prefs.getBool(_crashlyticsKey) ?? true,
           portraitLock: _prefs.getBool(_portraitLockKey) ?? false,
+          fullscreenSwipeBack:
+              _prefs.getBool(_fullscreenSwipeBackKey) ?? false,
+          exitOnSingleBack: _prefs.getBool(_exitOnSingleBackKey) ?? false,
           hideBarOnScroll: _prefs.getBool(_hideBarOnScrollKey) ?? true,
           clearCacheOnExit: _prefs.getBool(_clearCacheOnExitKey) ?? false,
           autoCfChallenge: _prefs.getBool(_autoCfChallengeKey) ?? true,
           expandRelatedLinks: _prefs.getBool(_expandRelatedLinksKey) ?? false,
           aiSwipeEntry: _prefs.getBool(_aiSwipeEntryKey) ?? false,
           useRichComposer: _prefs.getBool(_useRichComposerKey) ?? false,
+          composerEnterSoftBreak:
+              _prefs.getBool(_composerEnterSoftBreakKey) ?? true,
+          composerLiveRender: _prefs.getBool(_composerLiveRenderKey) ?? false,
           aiPostReviewEnabled: _prefs.getBool(_aiPostReviewEnabledKey) ?? false,
           aiPostReviewModelKey: _prefs.getString(_aiPostReviewModelPrefKey),
+          aiTranslationEnabled:
+              _prefs.getBool(_aiTranslationEnabledKey) ?? false,
+          aiTranslationTargetLanguage: _prefs.getString(
+            _aiTranslationTargetLanguageKey,
+          ),
+          aiTranslationModelKey: _prefs.getString(_aiTranslationModelPrefKey),
           hcaptchaCreateEndpoint: _prefs.getString(_hcaptchaCreateEndpointKey),
           dialogBlur: _prefs.getBool(_dialogBlurKey) ?? true,
+          cryptoRememberPassword: _prefs.getBool(_cryptoRememberPasswordKey) ?? false,
+          cryptoRecentAlgorithms:
+              _prefs.getStringList(_cryptoRecentAlgorithmsKey) ?? const [],
           showSignatures: _prefs.getBool(_showSignaturesKey) ?? false,
+          adaptiveSignatureFrameRate:
+              _prefs.getBool(_adaptiveSignatureFrameRateKey) ?? true,
           boostDanmaku: _prefs.getBool(_boostDanmakuKey) ?? false,
+          showSuggestedTopics:
+              _prefs.getBool(_showSuggestedTopicsKey) ?? true,
           defaultNestedView: _prefs.getBool(_defaultNestedViewKey) ?? false,
           nestedLineStyle: NestedLineStyle.fromString(
             _prefs.getString(_nestedLineStyleKey),
@@ -544,6 +680,10 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
           bottomNavIds:
               _prefs.getStringList(_bottomNavIdsKey) ??
               const [NavEntryIds.home, NavEntryIds.profile],
+          bottomNavLabelless: _prefs.getBool(_bottomNavLabellessKey) ?? false,
+          bottomNavFloating: _prefs.getBool(_bottomNavFloatingKey) ?? false,
+          bottomNavFloatingBlur:
+              _prefs.getBool(_bottomNavFloatingBlurKey) ?? false,
           displayModeRefreshRate:
               _prefs.getInt(_displayModeRefreshRateKey) ?? 0,
           progressGesturesEnabled:
@@ -575,6 +715,10 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
     isPortraitLocked = state.portraitLock;
     TopicCardStyleScope.current = state.topicCardStyle;
     CfChallengeService().autoVerifyEnabled = state.autoCfChallenge;
+    // CF 服务在「切兼容」询问里给用户第二条出路(关掉自动过盾),但它拿不到
+    // Riverpod 容器,也不该自己写 SharedPreferences —— 这里把持久化通道注入。
+    CfChallengeService().disableAutoVerifyRequest = () =>
+        setAutoCfChallenge(false);
     _syncSchedulerConfig();
   }
 
@@ -706,6 +850,16 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
     }
   }
 
+  Future<void> setFullscreenSwipeBack(bool enabled) async {
+    state = state.copyWith(fullscreenSwipeBack: enabled);
+    await _prefs.setBool(_fullscreenSwipeBackKey, enabled);
+  }
+
+  Future<void> setExitOnSingleBack(bool enabled) async {
+    state = state.copyWith(exitOnSingleBack: enabled);
+    await _prefs.setBool(_exitOnSingleBackKey, enabled);
+  }
+
   Future<void> setHideBarOnScroll(bool enabled) async {
     state = state.copyWith(hideBarOnScroll: enabled);
     await _prefs.setBool(_hideBarOnScrollKey, enabled);
@@ -737,6 +891,16 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
     await _prefs.setBool(_useRichComposerKey, enabled);
   }
 
+  Future<void> setComposerEnterSoftBreak(bool enabled) async {
+    state = state.copyWith(composerEnterSoftBreak: enabled);
+    await _prefs.setBool(_composerEnterSoftBreakKey, enabled);
+  }
+
+  Future<void> setComposerLiveRender(bool enabled) async {
+    state = state.copyWith(composerLiveRender: enabled);
+    await _prefs.setBool(_composerLiveRenderKey, enabled);
+  }
+
   Future<void> setAiPostReviewEnabled(bool enabled) async {
     state = state.copyWith(aiPostReviewEnabled: enabled);
     await _prefs.setBool(_aiPostReviewEnabledKey, enabled);
@@ -751,9 +915,52 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
     }
   }
 
+  Future<void> setAiTranslationEnabled(bool enabled) async {
+    if (state.aiTranslationEnabled == enabled) return;
+    state = state.copyWith(aiTranslationEnabled: enabled);
+    await _prefs.setBool(_aiTranslationEnabledKey, enabled);
+  }
+
+  Future<void> setAiTranslationTargetLanguage(String? language) async {
+    if (state.aiTranslationTargetLanguage == language) return;
+    state = state.copyWith(aiTranslationTargetLanguage: language);
+    if (language == null || language.isEmpty) {
+      await _prefs.remove(_aiTranslationTargetLanguageKey);
+    } else {
+      await _prefs.setString(_aiTranslationTargetLanguageKey, language);
+    }
+  }
+
+  Future<void> setAiTranslationModelKey(String? key) async {
+    if (state.aiTranslationModelKey == key) return;
+    state = state.copyWith(aiTranslationModelKey: key);
+    if (key == null || key.isEmpty) {
+      await _prefs.remove(_aiTranslationModelPrefKey);
+    } else {
+      await _prefs.setString(_aiTranslationModelPrefKey, key);
+    }
+  }
+
   Future<void> setDialogBlur(bool enabled) async {
     state = state.copyWith(dialogBlur: enabled);
     await _prefs.setBool(_dialogBlurKey, enabled);
+  }
+
+  Future<void> setCryptoRememberPassword(bool enabled) async {
+    state = state.copyWith(cryptoRememberPassword: enabled);
+    await _prefs.setBool(_cryptoRememberPasswordKey, enabled);
+  }
+
+  /// 记录一次算法使用：去重置顶、超出 6 条裁掉最旧。
+  Future<void> recordCryptoAlgorithmUsage(String algorithmId) async {
+    final current = state.cryptoRecentAlgorithms;
+    if (current.isNotEmpty && current.first == algorithmId) return;
+    final next = <String>[
+      algorithmId,
+      ...current.where((id) => id != algorithmId),
+    ].take(6).toList();
+    state = state.copyWith(cryptoRecentAlgorithms: next);
+    await _prefs.setStringList(_cryptoRecentAlgorithmsKey, next);
   }
 
   Future<void> setTopicCardStyle(TopicCardStyle style) async {
@@ -771,10 +978,21 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
     await _prefs.setBool(_showSignaturesKey, enabled);
   }
 
+  Future<void> setAdaptiveSignatureFrameRate(bool enabled) async {
+    state = state.copyWith(adaptiveSignatureFrameRate: enabled);
+    await _prefs.setBool(_adaptiveSignatureFrameRateKey, enabled);
+  }
+
   Future<void> setBoostDanmaku(bool enabled) async {
     if (state.boostDanmaku == enabled) return;
     state = state.copyWith(boostDanmaku: enabled);
     await _prefs.setBool(_boostDanmakuKey, enabled);
+  }
+
+  Future<void> setShowSuggestedTopics(bool enabled) async {
+    if (state.showSuggestedTopics == enabled) return;
+    state = state.copyWith(showSuggestedTopics: enabled);
+    await _prefs.setBool(_showSuggestedTopicsKey, enabled);
   }
 
   Future<void> setDefaultNestedView(bool enabled) async {
@@ -827,6 +1045,24 @@ class PreferencesNotifier extends StateNotifier<AppPreferences> {
   Future<void> setBottomNavIds(List<String> ids) async {
     state = state.copyWith(bottomNavIds: ids);
     await _prefs.setStringList(_bottomNavIdsKey, ids);
+  }
+
+  /// 底栏无字模式（仅手机底栏）
+  Future<void> setBottomNavLabelless(bool enabled) async {
+    state = state.copyWith(bottomNavLabelless: enabled);
+    await _prefs.setBool(_bottomNavLabellessKey, enabled);
+  }
+
+  /// 底栏悬浮样式（仅手机底栏）
+  Future<void> setBottomNavFloating(bool enabled) async {
+    state = state.copyWith(bottomNavFloating: enabled);
+    await _prefs.setBool(_bottomNavFloatingKey, enabled);
+  }
+
+  /// 悬浮胶囊毛玻璃模糊（仅悬浮底栏开启时生效）
+  Future<void> setBottomNavFloatingBlur(bool enabled) async {
+    state = state.copyWith(bottomNavFloatingBlur: enabled);
+    await _prefs.setBool(_bottomNavFloatingBlurKey, enabled);
   }
 
   /// 设置 Android 屏幕刷新率偏好（0 = auto，其它为目标刷新率整数）。

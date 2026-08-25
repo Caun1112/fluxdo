@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/pending_post.dart';
+import '../models/topic.dart';
 import '../providers/discourse_providers.dart';
 import '../widgets/desktop_refresh_indicator.dart';
 import '../services/discourse/discourse_service.dart';
@@ -11,7 +12,10 @@ import '../widgets/post/reply_sheet.dart';
 import '../services/toast_service.dart';
 import '../widgets/common/relative_time_text.dart';
 import '../l10n/s.dart';
+import '../providers/selected_topic_provider.dart';
 import '../utils/dialog_utils.dart';
+import '../widgets/layout/master_detail_layout.dart';
+import '../widgets/layout/master_detail_pane_host.dart';
 import 'topic_detail_page/topic_detail_page.dart';
 import 'create_topic_page.dart';
 
@@ -40,7 +44,7 @@ class _PendingPostsPageState extends ConsumerState<PendingPostsPage> {
   Widget build(BuildContext context) {
     final pendingAsync = ref.watch(pendingPostsProvider);
 
-    return Scaffold(
+    final list = Scaffold(
       appBar: AppBar(title: Text(context.l10n.review_myPending)),
       body: DesktopRefreshIndicator(
         onRefresh: _onRefresh,
@@ -96,9 +100,26 @@ class _PendingPostsPageState extends ConsumerState<PendingPostsPage> {
         ),
       ),
     );
+
+    return MasterDetailPaneHost(
+      stackProvider: selectedPendingPaneProvider,
+      master: list,
+      emptyDetail: MasterDetailEmptyState(
+        icon: Symbols.pending_actions_rounded,
+        message: context.l10n.layout_selectTopicHint,
+      ),
+    );
   }
 
   void _openTopic(PendingPost pending) {
+    // 宽屏进右栏,窄屏全屏 push(平行视界宿主标准分流)。
+    if (MasterDetailLayout.canShowBothPanesFor(context)) {
+      ref.read(selectedPendingPaneProvider.notifier).select(
+            topicId: pending.topicId!,
+            initialTitle: pending.title,
+          );
+      return;
+    }
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -182,18 +203,31 @@ class _PendingPostsPageState extends ConsumerState<PendingPostsPage> {
       confirmLabel: S.current.review_withdraw,
     );
     if (withdrawn && mounted) {
+      PendingReplyTargetRegistry.remove(pending.id);
       ToastService.showSuccess(S.current.review_withdrawn);
     }
   }
 
   Future<void> _onWithdrawAndEdit(PendingPost pending) async {
+    // 回复目标只在送审当下的会话里可知(服务端本人可见接口不吐,
+    // 见 PendingReplyTargetRegistry);冷场景提示会退化为直接回复话题
+    final isReply = !pending.isNewTopic;
+    final targetKnown =
+        !isReply || PendingReplyTargetRegistry.contains(pending.id);
+    final replyToPostNumber = PendingReplyTargetRegistry.lookup(pending.id);
+    final confirmContent = targetKnown
+        ? S.current.review_withdrawAndEditConfirmContent
+        : '${S.current.review_withdrawAndEditConfirmContent}\n\n'
+              '${S.current.review_replyTargetUnknownHint}';
+
     final withdrawn = await _confirmWithdraw(
       pending,
       title: S.current.review_withdrawAndEdit,
-      content: S.current.review_withdrawAndEditConfirmContent,
+      content: confirmContent,
       confirmLabel: S.current.review_withdrawAndEdit,
     );
     if (!withdrawn || !mounted) return;
+    PendingReplyTargetRegistry.remove(pending.id);
 
     if (pending.isNewTopic) {
       // 待审的新主题:原文带回创建话题页
@@ -208,11 +242,24 @@ class _PendingPostsPageState extends ConsumerState<PendingPostsPage> {
         ),
       );
     } else {
-      // 待审的回复:原文带回回复编辑器
+      // 待审的回复:原文带回回复编辑器,尽量恢复送审时的回复目标
+      Post? replyToPost;
+      if (replyToPostNumber != null) {
+        try {
+          replyToPost = await DiscourseService().getPostByNumber(
+            pending.topicId!,
+            replyToPostNumber,
+          );
+        } catch (_) {
+          // 目标楼层拉不到(已删除等):退化为直接回复话题
+        }
+      }
+      if (!mounted) return;
       await showReplySheet(
         context: context,
         topicId: pending.topicId,
         categoryId: pending.categoryId,
+        replyToPost: replyToPost,
         topicTitle: pending.title,
         initialContent: pending.raw,
       );

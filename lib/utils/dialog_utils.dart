@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:m3e_ui/m3e_ui.dart';
 
 import '../providers/preferences_provider.dart';
 import '../providers/shortcut_provider.dart';
+import '../services/dynamic_content_suspension_service.dart';
+import 'package:common_ui/common_ui.dart';
 import 'blur_config.dart';
 
 /// 根据用户偏好判断是否启用模糊
@@ -80,6 +83,26 @@ Future<T?> _pushShortcutManagedRoute<T>({
   });
 }
 
+Future<T?> _pushOverlayRoute<T>({
+  required BuildContext context,
+  required NavigatorState navigator,
+  required Route<T> route,
+  required bool suspendDynamicContent,
+  ShortcutSurfaceConfig? shortcutSurface,
+}) {
+  final lease = suspendDynamicContent
+      ? DynamicContentSuspensionService.instance.acquire(
+          reason: 'modal-overlay',
+        )
+      : null;
+  return _pushShortcutManagedRoute(
+    context: context,
+    navigator: navigator,
+    route: route,
+    shortcutSurface: shortcutSurface,
+  ).whenComplete(() => lease?.release());
+}
+
 Future<T?> pushAppRoute<T>({
   required BuildContext context,
   required Route<T> route,
@@ -110,6 +133,7 @@ Future<T?> showAppDialog<T>({
   bool blur = true,
   Duration transitionDuration = const Duration(milliseconds: 150),
   ShortcutSurfaceConfig? shortcutSurface,
+  bool suspendDynamicContent = true,
 }) {
   final enableBlur = blur && _isBlurEnabled(context);
   final navigator = Navigator.of(context, rootNavigator: useRootNavigator);
@@ -136,10 +160,11 @@ Future<T?> showAppDialog<T>({
     enableBlur: enableBlur,
   );
 
-  return _pushShortcutManagedRoute(
+  return _pushOverlayRoute(
     context: context,
     navigator: navigator,
     route: route,
+    suspendDynamicContent: suspendDynamicContent,
     shortcutSurface: shortcutSurface,
   );
 }
@@ -157,6 +182,7 @@ Future<T?> showAppGeneralDialog<T extends Object?>({
   RouteSettings? routeSettings,
   bool blur = true,
   ShortcutSurfaceConfig? shortcutSurface,
+  bool suspendDynamicContent = true,
 }) {
   final enableBlur = blur && _isBlurEnabled(context);
   final navigator = Navigator.of(context, rootNavigator: useRootNavigator);
@@ -175,10 +201,11 @@ Future<T?> showAppGeneralDialog<T extends Object?>({
     enableBlur: enableBlur,
   );
 
-  return _pushShortcutManagedRoute(
+  return _pushOverlayRoute(
     context: context,
     navigator: navigator,
     route: route,
+    suspendDynamicContent: suspendDynamicContent,
     shortcutSurface: shortcutSurface,
   );
 }
@@ -190,11 +217,30 @@ Widget _buildMaterialDialogTransitions(
   Animation<double> secondaryAnimation,
   Widget child,
 ) {
+  // M3E:入场淡入 + 从 0.92 弹性放大(defaultSpatial 解析解,带轻微
+  // 过冲的"落座感");退场纯淡出。关闭 M3E 时维持经典纯淡入。
+  if (M3eFlags.of(context).enabled) {
+    final scale = animation.status == AnimationStatus.reverse
+        ? const AlwaysStoppedAnimation(1.0)
+        : Tween<double>(begin: 0.92, end: 1.0).animate(
+            CurvedAnimation(parent: animation, curve: _kDialogEnterCurve),
+          );
+    return FadeTransition(
+      opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+      child: ScaleTransition(scale: scale, child: child),
+    );
+  }
   return FadeTransition(
     opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
     child: child,
   );
 }
+
+/// 对话框入场弹簧曲线:defaultSpatial(0.8/380)在 250ms 窗口内的
+/// 解析解,首峰轻微过冲(≈1.7%),收敛即落座。
+final Curve _kDialogEnterCurve = M3eMotion.defaultSpatial.curveFor(
+  const Duration(milliseconds: 250),
+);
 
 /// 替代 [showModalBottomSheet]，自动根据用户偏好添加背景高斯模糊。
 Future<T?> showAppBottomSheet<T>({
@@ -219,6 +265,7 @@ Future<T?> showAppBottomSheet<T>({
   AnimationStyle? sheetAnimationStyle,
   bool blur = true,
   ShortcutSurfaceConfig? shortcutSurface,
+  bool suspendDynamicContent = true,
 }) {
   final enableBlur = blur && _isBlurEnabled(context);
   final NavigatorState navigator = Navigator.of(
@@ -257,10 +304,11 @@ Future<T?> showAppBottomSheet<T>({
     enableBlur: enableBlur,
   );
 
-  return _pushShortcutManagedRoute(
+  return _pushOverlayRoute(
     context: context,
     navigator: navigator,
     route: route,
+    suspendDynamicContent: suspendDynamicContent,
     shortcutSurface: shortcutSurface,
   );
 }
@@ -296,6 +344,32 @@ class _BlurModalBottomSheetRoute<T> extends ModalBottomSheetRoute<T> {
     final barrier = super.buildModalBarrier();
     if (!enableBlur) return barrier;
     return _buildAnimatedBlurBarrier(barrier: barrier, animation: animation!);
+  }
+
+  /// Android 预测返回手势:慢划边缘时 sheet 跟手下滑,与手指下拉关闭是同
+  /// 一套动画 —— sheet 位移本就绑 route.animation(`_ModalBottomSheetState`
+  /// 里 `_sheetAnimation.parent = widget.route.animation`),而官方的下拉
+  /// 关闭改的是同一个 controller 的 value,手势进度喂进去即跟手,零新增
+  /// 动画代码。ModalBottomSheetRoute 不重写 buildTransitions(继承
+  /// ModalRoute 的默认实现 `return child`),故这里是干净的插入点;
+  /// 只认领手势、不包任何视觉 widget。详见
+  /// [wrapPredictiveBackForModalRoute] 与预测返回文件头的差异点 8。
+  @override
+  Widget buildTransitions(
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    return wrapPredictiveBackForModalRoute(
+      route: this,
+      child: super.buildTransitions(
+        context,
+        animation,
+        secondaryAnimation,
+        child,
+      ),
+    );
   }
 }
 

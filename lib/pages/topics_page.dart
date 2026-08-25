@@ -12,6 +12,7 @@ import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // ignore: depend_on_referenced_packages
 import 'package:flutter_riverpod/legacy.dart';
+import 'package:m3e_ui/m3e_ui.dart';
 import '../models/topic.dart';
 import '../models/category.dart';
 import '../providers/discourse_providers.dart';
@@ -30,6 +31,7 @@ import '../widgets/topic/topic_filter_menu.dart';
 import '../widgets/common/topic_badges.dart';
 import '../widgets/common/search_capsule.dart';
 import '../widgets/topic/category_drawer.dart';
+import '../widgets/topic/topic_card_prewarmer.dart';
 import '../widgets/topic/topic_item_builder.dart';
 import '../widgets/common/tag_selection_sheet.dart';
 import '../widgets/common/paged_list_footer.dart';
@@ -37,6 +39,7 @@ import '../navigation/nav_action_bus.dart';
 import '../providers/app_state_refresher.dart';
 import '../providers/preferences_provider.dart';
 import '../utils/load_more_coordinator.dart';
+import '../utils/motion_springs.dart';
 import '../utils/topic_keyword_filter.dart';
 import '../utils/frame_jank_monitor.dart';
 import '../utils/responsive.dart';
@@ -44,6 +47,7 @@ import '../widgets/layout/master_detail_layout.dart';
 import '../widgets/common/error_view.dart';
 import '../widgets/common/loading_dialog.dart';
 import '../widgets/common/fading_edge_scroll_view.dart';
+import 'package:common_ui/common_ui.dart';
 import '../widgets/offline_indicator.dart';
 import '../l10n/s.dart';
 import '../models/shortcut_binding.dart';
@@ -88,14 +92,8 @@ const _capsuleRowHeight = 48.0;
 const _navRowHeight = 40.0;
 const _tagsRowHeight = 36.0;
 
-/// 首页运动系统统一弹簧（临界阻尼，settle ~250ms）：顶区列表吸附、
-/// 工具段吸附、抽屉 settle、胶囊 morph 全部同族 —— 且所有收尾动画
-/// **继承松手/上游速度**（此前全是零初速的罐头 easeOutCubic，跟手段
-/// 与动画段之间有速度断层，是"不够丝滑"的头号来源）。
-final SpringDescription _kHeaderSpring = SpringDescription.withDampingRatio(
-  mass: 1.0,
-  stiffness: 500.0,
-);
+/// 首页运动系统统一弹簧,定义与说明见 [kHeaderMotionSpring]。
+final SpringDescription _kHeaderSpring = kHeaderSpringDescription;
 
 /// 顶栏收放控制器。两种收放语义分治（iOS/Telegram 搜索栏范式）：
 ///
@@ -191,8 +189,8 @@ class _HeaderCollapseController extends ChangeNotifier {
             .clamp(0.0, 0.05);
     final target = _morphTarget;
     // 临界阻尼弹簧半隐式积分（ω=√(stiffness/mass)，与全局弹簧
-    // _kHeaderSpring 同参）：a = ω²·(target-x) − 2ω·v
-    const omega = 22.4; // sqrt(500/1)
+    // _kHeaderSpring 同参 kHeaderMotionSpring）：a = ω²·(target-x) − 2ω·v
+    const omega = 22.4; // sqrt(kHeaderMotionSpring.stiffness / 1)
     final accel =
         omega * omega * (target - _morph) - 2 * omega * _morphVelocity;
     _morphVelocity += accel * dt;
@@ -659,7 +657,21 @@ class _TabListScrollController extends ScrollController {
 
 /// 帖子列表页面 - 分类 Tab + 排序下拉 + 标签 Chips
 class TopicsPage extends ConsumerStatefulWidget {
-  const TopicsPage({super.key});
+  const TopicsPage({
+    super.key,
+    this.onSearchRequested,
+    this.externalCategoryId,
+    this.externalTag,
+    this.isActive = true,
+  });
+
+  final ValueChanged<SearchFilter?>? onSearchRequested;
+  final int? externalCategoryId;
+  final String? externalTag;
+
+  /// 宿主底栏 tab 是否活跃(IndexedStack 常驻:不活跃时本页的 master
+  /// 快捷键注册须失效,否则截胡其他 tab 的按键)。
+  final bool isActive;
 
   @override
   ConsumerState<TopicsPage> createState() => _TopicsPageState();
@@ -677,10 +689,13 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
   late final ShortcutScopeBinding _tabShortcutBinding = ShortcutScopeBinding(
     ref: ref,
     scope: ShortcutScope.master,
+    // IndexedStack 常驻:宿主 tab 不活跃时注册失效(见 TopicsPage.isActive)
+    enabled: () => widget.isActive,
   );
   int _tabLength = 1; // 初始只有"全部"
   int _currentTabIndex = 0;
   List<int> _visiblePinnedIds = []; // 过滤后的可见分类 ID
+  (int?, String?)? _lastExternalSelection;
 
   late final _HeaderCollapseController _headerController;
   bool _invalidateScheduled = false;
@@ -1054,7 +1069,13 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
 
     final topPadding = MediaQuery.of(context).padding.top;
     final isLoggedIn = ref.watch(currentUserProvider).value != null;
-    final allPinnedIds = ref.watch(pinnedCategoriesProvider);
+    final savedPinnedIds = ref.watch(pinnedCategoriesProvider);
+    final allPinnedIds = <int>[
+      ...savedPinnedIds,
+      if (widget.externalCategoryId case final id?
+          when !savedPinnedIds.contains(id))
+        id,
+    ];
     final categoryMapAsync = ref.watch(categoryMapProvider);
     final categoryMap = categoryMapAsync.value;
     // 首页卡片统一复用页面层的分类快照，避免每张 TopicCard 单独订阅
@@ -1067,6 +1088,23 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
         : allPinnedIds;
     final currentFilter = ref.watch(topicFilterProvider);
     _syncTabsIfNeeded(pinnedIds);
+
+    final externalSelection = (widget.externalCategoryId, widget.externalTag);
+    if (_lastExternalSelection != externalSelection) {
+      _lastExternalSelection = externalSelection;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final categoryId = widget.externalCategoryId;
+        final index = categoryId == null
+            ? 0
+            : pinnedIds.indexOf(categoryId) + 1;
+        if (index >= 0 && index < _tabController.length) {
+          _tabController.animateTo(index);
+        }
+        ref.read(tabTagsProvider(categoryId).notifier).state =
+            widget.externalTag == null ? const [] : [widget.externalTag!];
+      });
+    }
 
     // 监听侧栏分类选中变化，同步切换 tab
     ref.listen(activeSidebarCategoryIdProvider, (prev, next) {
@@ -1283,8 +1321,18 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
         reverseTransitionDuration: const Duration(milliseconds: 280),
         pageBuilder: (_, _, _) =>
             SearchPage(initialFilter: filter, heroCapsule: true),
-        transitionsBuilder: (_, animation, _, child) =>
-            FadeTransition(opacity: animation, child: child),
+        transitionsBuilder: (context, animation, secondaryAnimation, child) =>
+            buildPredictiveBackPageTransitions(
+              context,
+              animation,
+              secondaryAnimation,
+              child,
+              // 搜索胶囊靠 Hero 一镜到底,滑出会毁掉 morph,故用 fade;
+              // 认领手势是 Hero 跟手飞行的前提(两端已置
+              // transitionOnUserGestures)。手势期与按钮返回同一 fade。
+              transitionBuilder: (_, animation, _, child) =>
+                  FadeTransition(opacity: animation, child: child),
+            ),
       ),
     );
   }
@@ -1715,6 +1763,7 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
         topInset: _collapsibleExtentFor(_visiblePinnedIds, tags),
         headerController: _headerController,
         onLoginRequired: _goToLogin,
+        parentActive: widget.isActive,
       ),
     );
   }
@@ -1862,6 +1911,8 @@ class _CollapsibleHeader extends StatelessWidget {
                   rect: capsuleRect,
                   child: Hero(
                     tag: kSearchCapsuleHeroTag,
+                    // 预测返回(user gesture)时胶囊也要 morph 回来
+                    transitionOnUserGestures: true,
                     flightShuttleBuilder: searchCapsuleFlightShuttle,
                     child: SearchCapsule(
                       onTap: onSearchTap,
@@ -2426,6 +2477,9 @@ class _TopicList extends ConsumerStatefulWidget {
   final int? categoryId;
   final Map<int, Category> categoryMap;
 
+  /// 宿主底栏 tab 是否活跃(快捷键注册的失活谓词用)
+  final bool parentActive;
+
   /// 页面持有的滚动控制器（snap 需要从页面驱动当前列表）
   final ScrollController scrollController;
 
@@ -2443,6 +2497,7 @@ class _TopicList extends ConsumerStatefulWidget {
     required this.topInset,
     required this.headerController,
     required this.categoryMap,
+    required this.parentActive,
     this.categoryId,
   });
 
@@ -2452,7 +2507,7 @@ class _TopicList extends ConsumerStatefulWidget {
 
 class _TopicListState extends ConsumerState<_TopicList>
     with AutomaticKeepAliveClientMixin {
-  final _refreshIndicatorKey = GlobalKey<RefreshIndicatorState>();
+  final _refreshIndicatorKey = GlobalKey<M3eRefreshIndicatorState>();
 
   /// overlay 头部架构下无 NestedScrollView 注入的 PrimaryScrollController，
   /// 回顶/键盘导航都走页面下发的控制器
@@ -2460,6 +2515,8 @@ class _TopicListState extends ConsumerState<_TopicList>
   late final ShortcutScopeBinding _listShortcutBinding = ShortcutScopeBinding(
     ref: ref,
     scope: ShortcutScope.master,
+    // IndexedStack 常驻:宿主 tab 不活跃时注册失效
+    enabled: () => widget.parentActive,
   );
   bool _isLoadingNewTopics = false;
 
@@ -2874,7 +2931,7 @@ class _TopicListState extends ConsumerState<_TopicList>
               final visible = widget.headerController.visibleExtentFor(
                 widget.topInset,
               );
-              return RefreshIndicator(
+              return M3eRefreshIndicator(
                 edgeOffset: visible,
                 onRefresh: () async {
                   _loadMoreCoordinator.resetCooldown();
@@ -2919,7 +2976,11 @@ class _TopicListState extends ConsumerState<_TopicList>
         }
         _lastHeaderOffset = headerOffset;
 
-        return DesktopRefreshIndicator(
+        return TopicCardPrewarmScope(
+          topics: topics,
+          categoryMap: widget.categoryMap,
+          statsAvailableWidth: statsAvailableWidth,
+          child: DesktopRefreshIndicator(
           refreshIndicatorKey: _refreshIndicatorKey,
           refreshNotifier: masterRefreshNotifier,
           // 头部可折叠段悬浮在列表上方;列表贴顶时头部必然全展开
@@ -3167,6 +3228,7 @@ class _TopicListState extends ConsumerState<_TopicList>
                 ),
               ],
             ),
+          ),
           ),
         );
       },

@@ -4,9 +4,9 @@ import 'package:app_icons/app_icons.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../l10n/s.dart';
-import '../../pages/user_profile_page.dart';
 import '../../providers/discourse_providers.dart';
 import '../../providers/preferences_provider.dart';
+import '../../providers/selected_topic_provider.dart';
 import '../../services/toast_service.dart';
 import '../../utils/share_utils.dart';
 import '../common/radial_long_press_menu.dart';
@@ -66,6 +66,8 @@ void composeMessageToUser({
 /// - 私信：已登录且当前用户可发私信且非自己（目标用户级能力此时未知，
 ///   对方关闭私信时由发送阶段服务端报错 + ErrorInterceptor 兜底）
 /// - @用户：[onMentionUser] 非 null（链路可回复）且非自己
+/// - 只看此人：有话题上下文时显示(发帖数此时未知,不设官方 ≥2 帖门
+///   槛;已在过滤该用户时变「取消只看」)
 List<RadialMenuItem> buildAvatarMenuItems(
   BuildContext context, {
   required String username,
@@ -74,25 +76,32 @@ List<RadialMenuItem> buildAvatarMenuItems(
   String? topicTitle,
   void Function(String username)? onMentionUser,
 }) {
-  final currentUser = ProviderScope.containerOf(
-    context,
-    listen: false,
-  ).read(currentUserProvider).value;
+  final container = ProviderScope.containerOf(context, listen: false);
+  final currentUser = container.read(currentUserProvider).value;
   final isSelf = currentUser != null && currentUser.username == username;
   final canMessage =
       currentUser != null &&
       currentUser.canSendPrivateMessages != false &&
       !isSelf;
 
+  // 话题内过滤状态:决定「只看此人/取消只看」形态
+  bool isFilteringThisUser = false;
+  bool canFilter = false;
+  if (topicId != null) {
+    final params = TopicDetailNotifier.activeParamsFor(topicId);
+    if (params != null && container.exists(topicDetailProvider(params))) {
+      canFilter = true;
+      isFilteringThisUser =
+          container.read(topicDetailProvider(params).notifier).usernameFilter ==
+          username;
+    }
+  }
+
   return [
     RadialMenuItem(
       icon: Symbols.account_circle_rounded,
       label: S.current.avatarMenu_viewProfile,
-      onSelected: () {
-        Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => UserProfilePage(username: username)),
-        );
-      },
+      onSelected: () => EmbeddedStackScope.openProfile(context, username),
     ),
     if (canMessage)
       RadialMenuItem(
@@ -111,6 +120,21 @@ List<RadialMenuItem> buildAvatarMenuItems(
         icon: Symbols.alternate_email_rounded,
         label: S.current.avatarMenu_mention,
         onSelected: () => onMentionUser(username),
+      ),
+    if (canFilter)
+      RadialMenuItem(
+        icon: isFilteringThisUser
+            ? Symbols.filter_list_off_rounded
+            : Symbols.filter_list_rounded,
+        label: isFilteringThisUser
+            ? S.current.avatarMenu_cancelFilterPosts
+            : S.current.avatarMenu_filterPosts,
+        onSelected: () => container
+            .read(topicUserFilterRequestProvider.notifier)
+            .request(
+              topicId: topicId!,
+              username: isFilteringThisUser ? null : username,
+            ),
       ),
     RadialMenuItem(
       icon: Symbols.content_copy_rounded,

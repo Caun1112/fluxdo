@@ -5,10 +5,15 @@ import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html_parser;
 import '../../../l10n/s.dart';
 import '../../../models/topic.dart';
+import '../../../providers/preferences_provider.dart';
+import '../../../providers/topic_session_provider.dart';
+import '../../../utils/blocked_user_filter.dart';
 import '../../../utils/frame_jank_monitor.dart';
 import '../../common/perf_span_box.dart';
 import '../../../services/toast_service.dart';
 import '../../../utils/fluxdo_render_callbacks.dart';
+import '../post_boost/boost_actions.dart';
+import '../post_boost/boost_danmaku.dart';
 import '../post_signature_block.dart';
 import 'quote_selection_helper.dart';
 import 'render_parse_cache.dart';
@@ -190,7 +195,9 @@ class NewEngineLongPostData {
 /// 新引擎长帖的单个 chunk 段:用 [FluxdoRender] 渲染 chunk.html。
 /// 自带自研选区(chunk 内),图片/脚注靠 [imageIndexOffset]/[footnotesHtml]
 /// + 共享 [callbacks] 对齐整帖。
-class NewEngineChunkSegment extends StatelessWidget {
+/// 首 chunk(chunkIndex == 0)在弹幕模式下叠加 [BoostDanmaku]:长帖的
+/// header/chunk/footer 是不同 sliver item,弹幕层只能落在正文段上。
+class NewEngineChunkSegment extends ConsumerWidget {
   final Post post;
   final int topicId;
   final bool selected;
@@ -202,6 +209,12 @@ class NewEngineChunkSegment extends StatelessWidget {
   final String? footnotesHtml;
   final FluxdoRenderCallbacks callbacks;
   final void Function(String plainText, Post post)? onQuoteSelection;
+
+  /// 高亮指定用户名的 boost(从 boost 通知跳转时使用)
+  final String? highlightBoostUsername;
+
+  /// 话题标题(boost 作者卡片预填私信标题用)
+  final String? topicTitle;
 
   const NewEngineChunkSegment({
     super.key,
@@ -216,27 +229,27 @@ class NewEngineChunkSegment extends StatelessWidget {
     required this.footnotesHtml,
     required this.callbacks,
     required this.onQuoteSelection,
+    this.highlightBoostUsername,
+    this.topicTitle,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
     FrameJankMonitor.noteBuild(
       'chk#${post.postNumber}:$chunkIndex/'
       '${(chunk.html.length / 1000).toStringAsFixed(1)}k',
     );
-    // PerfSpanBox:单 chunk 子树的 layout/paint 账单(监控关闭零开销)
-    return PerfSpanBox(
-      label: 'chk#${post.postNumber}:$chunkIndex',
-      child: PostSegmentFrame(
-      post: post,
-      selected: selected,
-      highlight: highlight,
-      showBottomBorder: false,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: FluxdoRender(
+    Widget content = FluxdoRender(
           cookedHtml: chunk.html,
           parsedNodes: parsedNodes,
+          // 正文字号注入 contentFontScale(与 PostItem 短帖路径一致):
+          // 不传时 NodeFactory 回退 theme.bodyMedium,长帖 chunk 的字号设置失效。
+          baseTextStyle: theme.textTheme.bodyMedium?.copyWith(
+            height: 1.5,
+            fontSize: (theme.textTheme.bodyMedium?.fontSize ?? 14) *
+                ref.watch(preferencesProvider).contentFontScale,
+          ),
           imageIndexOffset: imageIndexOffset,
           footnotesHtml: footnotesHtml,
           // 同 post 各 chunk 共享一个选区作用域 → 选区可跨 chunk。
@@ -282,14 +295,85 @@ class NewEngineChunkSegment extends StatelessWidget {
               ),
           onCopyToast: () =>
               ToastService.showSuccess(context.l10n.common_copiedToClipboard),
+        );
+
+    // 首 chunk 弹幕层(与 PostItem 的短帖路径同一套开关判定)
+    if (chunkIndex == 0) {
+      final danmakuBoosts = _danmakuBoosts(ref);
+      if (danmakuBoosts != null && danmakuBoosts.isNotEmpty) {
+        final trackCount = danmakuBoosts.length <= 1
+            ? 1
+            : danmakuBoosts.length <= 4
+            ? 2
+            : 3;
+        content = Stack(
+          clipBehavior: Clip.none,
+          children: [
+            content,
+            Positioned.fill(
+              child: BoostDanmaku(
+                visibilityKey: post.id,
+                boosts: danmakuBoosts,
+                maxTrackCount: trackCount,
+                highlightUsername: highlightBoostUsername,
+                onBoostTap: (boost, anchorRect) {
+                  BoostActions.show(
+                    context: context,
+                    ref: ref,
+                    post: post,
+                    topicId: topicId,
+                    boost: boost,
+                    anchorRect: anchorRect,
+                    topicTitle: topicTitle,
+                  );
+                },
+              ),
+            ),
+          ],
+        );
+      }
+    }
+
+    // PerfSpanBox:单 chunk 子树的 layout/paint 账单(监控关闭零开销)
+    return PerfSpanBox(
+      label: 'chk#${post.postNumber}:$chunkIndex',
+      child: PostSegmentFrame(
+        post: post,
+        selected: selected,
+        highlight: highlight,
+        showBottomBorder: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: content,
         ),
       ),
-      ),
+    );
+  }
+
+  /// 弹幕模式下首 chunk 要放的 boost;不放(偏好关/帖级关/无 boost)时
+  /// 返回 null。watch 都带 select,与短帖路径同粒度。
+  List<Boost>? _danmakuBoosts(WidgetRef ref) {
+    final danmakuPref = ref.watch(
+      preferencesProvider.select((p) => p.boostDanmaku),
+    );
+    if (!danmakuPref) return null;
+    final danmakuOff = ref.watch(
+      topicSessionProvider(
+        topicId,
+      ).select((s) => s.danmakuOffPostIds.contains(post.id)),
+    );
+    if (danmakuOff) return null;
+    final blockedUsernames = ref.watch(
+      preferencesProvider.select((p) => p.normalizedBlockedUsernames),
+    );
+    return BlockedUserFilter.visibleBoosts(
+      post.boosts ?? const <Boost>[],
+      blockedUsernames,
     );
   }
 }
 
-class LongPostHeaderSegment extends StatelessWidget {
+class LongPostHeaderSegment extends ConsumerWidget {
   final Post post;
   final int topicId;
   final bool selected;
@@ -316,8 +400,35 @@ class LongPostHeaderSegment extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     FrameJankMonitor.noteBuild('hdr#${post.postNumber}');
+    // 弹幕开关(与 PostItem 短帖路径同判定):全局偏好开 且 有可见 boost
+    // 才显示 header 上的帖级 toggle;开关状态在会话层,三段共享。
+    final danmakuPref = ref.watch(
+      preferencesProvider.select((p) => p.boostDanmaku),
+    );
+    bool? danmakuActive;
+    VoidCallback? onToggleDanmaku;
+    if (danmakuPref) {
+      final blockedUsernames = ref.watch(
+        preferencesProvider.select((p) => p.normalizedBlockedUsernames),
+      );
+      final hasBoosts = BlockedUserFilter.visibleBoosts(
+        post.boosts ?? const <Boost>[],
+        blockedUsernames,
+      ).isNotEmpty;
+      if (hasBoosts) {
+        final danmakuOff = ref.watch(
+          topicSessionProvider(
+            topicId,
+          ).select((s) => s.danmakuOffPostIds.contains(post.id)),
+        );
+        danmakuActive = !danmakuOff;
+        onToggleDanmaku = () => ref
+            .read(topicSessionProvider(topicId).notifier)
+            .setDanmakuOff(post.id, !danmakuOff);
+      }
+    }
     return PostSegmentFrame(
       post: post,
       selected: selected,
@@ -334,6 +445,8 @@ class LongPostHeaderSegment extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
         onJumpToPost: onJumpToPost,
         onMentionUser: onMentionUser,
+        danmakuActive: danmakuActive,
+        onToggleDanmaku: onToggleDanmaku,
       ),
     );
   }
@@ -366,6 +479,12 @@ class LongPostFooterSegment extends ConsumerWidget {
   /// OP 帖专属插槽: 仅在 postNumber == 1 时透传给 PostFooterSection
   final Widget? opTopSlot;
 
+  /// post-voting(问答)话题:footer 显示赞成/反对控件与评论区
+  final bool isPostVotingTopic;
+
+  /// 话题 closed/archived(问答投票禁投判定)
+  final bool topicClosed;
+
   const LongPostFooterSegment({
     super.key,
     required this.post,
@@ -389,11 +508,35 @@ class LongPostFooterSegment extends ConsumerWidget {
     this.isPmWithNonHumanUser = false,
     this.onShowPostDetail,
     this.opTopSlot,
+    this.isPostVotingTopic = false,
+    this.topicClosed = false,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     FrameJankMonitor.noteBuild('ftr#${post.postNumber}');
+    // 与首 chunk 弹幕层同判定:弹幕实际在显示时才隐藏 footer 的 boost
+    // 气泡列表(danmakuActive 传给 PostFooterSection/_buildBoostArea)。
+    final danmakuPref = ref.watch(
+      preferencesProvider.select((p) => p.boostDanmaku),
+    );
+    bool? danmakuActive;
+    if (danmakuPref) {
+      final blockedUsernames = ref.watch(
+        preferencesProvider.select((p) => p.normalizedBlockedUsernames),
+      );
+      final hasBoosts = BlockedUserFilter.visibleBoosts(
+        post.boosts ?? const <Boost>[],
+        blockedUsernames,
+      ).isNotEmpty;
+      if (hasBoosts) {
+        danmakuActive = !ref.watch(
+          topicSessionProvider(
+            topicId,
+          ).select((s) => s.danmakuOffPostIds.contains(post.id)),
+        );
+      }
+    }
     return PostSegmentFrame(
       post: post,
       selected: selected,
@@ -419,6 +562,7 @@ class LongPostFooterSegment extends ConsumerWidget {
             acceptedAnswers: acceptedAnswers,
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
             highlightBoostUsername: highlightBoostUsername,
+            danmakuActive: danmakuActive,
             onReply: onReply,
             onEdit: onEdit,
             onShareAsImage: onShareAsImage,
@@ -431,6 +575,8 @@ class LongPostFooterSegment extends ConsumerWidget {
             isPmWithNonHumanUser: isPmWithNonHumanUser,
             onShowPostDetail: onShowPostDetail,
             opTopSlot: opTopSlot,
+            isPostVotingTopic: isPostVotingTopic,
+            topicClosed: topicClosed,
           ),
         ],
       ),

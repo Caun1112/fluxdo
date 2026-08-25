@@ -97,22 +97,26 @@ class ShareImageWidget extends ConsumerWidget {
 
     return RepaintBoundary(
       key: repaintBoundaryKey,
-      child: Container(
-        width: 375,
-        padding: const EdgeInsets.all(20),
-        color: bgColor,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: _buildSections(
-            context,
-            targetPost,
-            textColor,
-            secondaryTextColor,
-            borderColor,
-            cardColor,
+      child: Stack(
+        children: [
+          Container(
+            width: 375,
+            padding: const EdgeInsets.all(20),
+            color: bgColor,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: _buildSections(
+                context,
+                targetPost,
+                textColor,
+                secondaryTextColor,
+                borderColor,
+                cardColor,
+              ),
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
