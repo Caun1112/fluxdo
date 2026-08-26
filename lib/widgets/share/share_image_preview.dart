@@ -662,21 +662,18 @@ class _ShareImagePreviewState extends ConsumerState<ShareImagePreview> {
             ),
             child: Row(
               children: [
-                // 复制图片
+                // 分享按钮
                 Expanded(
-                  child: OutlinedButton.icon(
+                  child: FilledButton.icon(
+                    key: const ValueKey('share-image-share-action'),
                     onPressed: (_anyLoading || _targetPost == null)
                         ? null
-                        : _copyImage,
-                    icon: _isCopying
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Symbols.content_copy_rounded, size: 18),
-                    label: Text(context.l10n.common_copy),
-                    style: OutlinedButton.styleFrom(
+                        : _shareImage,
+                    icon: _isSharing
+                        ? const LoadingSpinner(size: 18, color: Colors.white)
+                        : const Icon(Symbols.share_rounded),
+                    label: Text(context.l10n.common_share),
+                    style: FilledButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                     ),
                   ),
@@ -685,6 +682,7 @@ class _ShareImagePreviewState extends ConsumerState<ShareImagePreview> {
                 // 保存按钮
                 Expanded(
                   child: OutlinedButton.icon(
+                    key: const ValueKey('share-image-save-action'),
                     onPressed: (_anyLoading || _targetPost == null)
                         ? null
                         : _saveImage,
@@ -698,17 +696,22 @@ class _ShareImagePreviewState extends ConsumerState<ShareImagePreview> {
                   ),
                 ),
                 const SizedBox(width: 8),
-                // 分享按钮
+                // 复制图片
                 Expanded(
-                  child: FilledButton.icon(
+                  child: OutlinedButton.icon(
+                    key: const ValueKey('share-image-copy-action'),
                     onPressed: (_anyLoading || _targetPost == null)
                         ? null
-                        : _shareImage,
-                    icon: _isSharing
-                        ? const LoadingSpinner(size: 18, color: Colors.white)
-                        : const Icon(Symbols.share_rounded),
-                    label: Text(context.l10n.common_share),
-                    style: FilledButton.styleFrom(
+                        : _copyImage,
+                    icon: _isCopying
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Symbols.content_copy_rounded, size: 18),
+                    label: Text(context.l10n.common_copy),
+                    style: OutlinedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                     ),
                   ),
