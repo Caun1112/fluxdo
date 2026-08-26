@@ -289,28 +289,11 @@ class HomeTopicRangeQuickPanel extends ConsumerWidget {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<TopicSortOrder>(
-                      key: const ValueKey('home-topic-sort-dropdown'),
-                      value: currentOrder,
-                      isExpanded: true,
-                      isDense: true,
-                      borderRadius: BorderRadius.circular(12),
-                      items: [
-                        for (final order in TopicSortOrder.values)
-                          DropdownMenuItem(
-                            value: order,
-                            child: Text(order.label),
-                          ),
-                      ],
-                      onChanged: (order) {
-                        if (order != null) {
-                          ref
-                              .read(topicSortOrderProvider.notifier)
-                              .setOrder(order);
-                        }
-                      },
-                    ),
+                  child: Text(
+                    context.l10n.topic_sortTooltip(currentOrder.label),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelLarge,
                   ),
                 ),
                 IconButton(
@@ -328,6 +311,24 @@ class HomeTopicRangeQuickPanel extends ConsumerWidget {
                         : Symbols.arrow_downward_rounded,
                   ),
                 ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              key: const ValueKey('home-topic-sort-options'),
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final order in TopicSortOrder.values)
+                  ChoiceChip(
+                    key: ValueKey('home-topic-sort-${order.name}'),
+                    label: Text(order.label),
+                    selected: currentOrder == order,
+                    onSelected: (_) => ref
+                        .read(topicSortOrderProvider.notifier)
+                        .setOrder(order),
+                    visualDensity: VisualDensity.compact,
+                  ),
               ],
             ),
             if (canDismiss) ...[

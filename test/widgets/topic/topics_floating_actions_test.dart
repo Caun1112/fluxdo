@@ -10,6 +10,7 @@ import 'package:fluxdo/pages/topics_screen.dart';
 import 'package:fluxdo/providers/category_provider.dart';
 import 'package:fluxdo/providers/theme_provider.dart';
 import 'package:fluxdo/providers/topic_list/filter_provider.dart';
+import 'package:fluxdo/providers/topic_list/sort_provider.dart';
 import 'package:fluxdo/providers/topic_list/tab_state_provider.dart';
 import 'package:fluxdo/services/local_notification_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -199,9 +200,18 @@ void main() {
       findsNothing,
     );
     expect(
-      find.byKey(const ValueKey('home-topic-sort-dropdown')),
+      find.byKey(const ValueKey('home-topic-sort-options')),
       findsOneWidget,
     );
+    expect(find.byType(DropdownButton<TopicSortOrder>), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('home-topic-sort-created')));
+    await tester.pump();
+    expect(container.read(topicSortOrderProvider), TopicSortOrder.created);
+
+    await tester.tap(find.byKey(const ValueKey('home-topic-sort-direction')));
+    await tester.pump();
+    expect(container.read(topicSortAscendingProvider), isTrue);
 
     await tester.tap(find.byKey(const ValueKey('home-topic-filter-hot')));
     await tester.pumpAndSettle();

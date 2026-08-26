@@ -1067,7 +1067,6 @@ class _TopicsPageState extends ConsumerState<TopicsPage>
     final pinnedIds = visibleIds != null
         ? allPinnedIds.where((id) => visibleIds.contains(id)).toList()
         : allPinnedIds;
-    final currentFilter = ref.watch(topicFilterProvider);
     _syncTabsIfNeeded(pinnedIds);
 
     final externalSelection = (widget.externalCategoryId, widget.externalTag);
