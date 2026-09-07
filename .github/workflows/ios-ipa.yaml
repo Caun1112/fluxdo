@@ -5,7 +5,10 @@ on:
   # fork 默认分支尚无此工作流，首次推送合并分支时启动构建。
   push:
     branches: [codex/merge-upstream-v0.2.28-20260907]
-    paths: [.github/workflows/ios-ipa.yaml]
+    paths:
+      - .github/workflows/ios-ipa.yaml
+      - tool/build_ipa_nosign.dart
+      - scripts/ci/validate_ipa.py
 
 permissions:
   contents: read

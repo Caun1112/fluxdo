@@ -26,7 +26,9 @@ Future<void> main(List<String> args) async {
     exit(64);
   }
 
-  final version = await _resolveVersion(filteredArgs);
+  final version = yes && filteredArgs.isEmpty
+      ? _readVersionFromPubspec()
+      : await _resolveVersion(filteredArgs);
   if (version.isEmpty) {
     stderr.writeln('无法确定版本号');
     exit(1);
