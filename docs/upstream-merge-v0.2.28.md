@@ -50,7 +50,7 @@ import 'widgets/invite_private_message_dialog.dart';
 - dart analyze lib/pages/topic_detail_page lib/pages/topics_page.dart lib/providers/preferences_provider.dart lib/widgets/share/share_image_preview.dart：无 error/warning；一条合并前已有的 info（_filter_actions.dart:18 缺少大括号），未做无关修改。
 - YAML 解析、IPA 校验脚本语法检查、Git diff 空白检查通过。
 
-待远程执行：工作流回归测试、Release 编译、IPA 实际解包与原生库检查、最终 Artifact 上传。不能用本地静态验证代替 CI 成功。
+云端已完成：104 项回归测试通过，Release 编译、IPA 实际解包与原生库检查、最终 Artifact 上传均成功。构建提交 bda6a3289239389b8884a2172ee8a3157f071e19。
 
 待真机运行回归：TrollStore 安装后冷启动，确认不白屏；登录及网络请求；首页筛选和常用分类；话题返回及已读加速；分享图片的主题、显示选项、分享/保存/复制；iOS 保存到文件面板；私信成员管理；图片浏览和视频播放。
 
@@ -62,12 +62,12 @@ import 'widgets/invite_private_message_dialog.dart';
 - 复用 dart tool/build_ipa_nosign.dart --yes，实际内部执行 flutter build ios --release --no-codesign。
 - .app：build/ios/iphoneos/Runner.app。
 - IPA：build/ios/ipa/fluxdo-0.2.28-nosign.ipa；Artifact：fluxdo-ios-unsigned，保留 7 天，只上传 IPA。
-- workflow_dispatch；首次推送指定合并分支且工作流文件变化时自动构建，避免依赖默认分支预先存在工作流。
+- workflow_dispatch；推送指定合并分支且工作流或 IPA 构建/验证脚本变化时自动构建，避免依赖默认分支预先存在工作流。
 - 无 Apple Developer 证书或 Provisioning Profile；不使用 exportArchive。Flutter native-assets 可能自带 adhoc 签名，保留 fork 归一化步骤移除该类签名。
 - Runner.entitlements 包含 com.apple.developer.web-browser；包内 Frameworks 与原生库需由 TrollStore 安装流程处理。当前工程没有额外应用扩展 Target。
 - 项目已有 Rust 预处理同时生成 device/simulator 静态库，但最终应用和 IPA 使用 iphoneos；不要求本地 Simulator 或 Xcode。
 - 本地无 iOS Release/Archive/DerivedData 生成，仅使用已有 Flutter 进行测试与生成代码；最终按需下载单个 IPA。
-- 目前没有 CI 产物，尚未验证 IPA 实际结构或 TrollStore 真机运行。
+- CI 构建及 IPA 实际结构均已验证；主程序和插件原生库未签名，App.framework 与 Flutter.framework 保留 Flutter 自带的 adhoc 签名，无 Apple 证书。未发现需要归一化的 native-assets；TrollStore 真机安装和启动尚未验证。
 
 ## 审查与回滚
 
@@ -86,10 +86,25 @@ git submodule update --init --recursive
 
 原开发分支与备份都仍指向 6bfe673a。若以后需要撤销已发布的合并，应在目标分支使用 git revert -m 1 <合并提交>，审查并解决可能的反向冲突；不要 reset --hard 或强制推送。
 
-推送需单独获得用户授权，拟执行：
+用户已授权，以下推送已完成：
 
 ```sh
 git push -u origin codex/merge-upstream-v0.2.28-20260907
 ```
 
 此次推送会触发仅 iOS 构建工作流，不更新远程 main、不发布 Release。
+
+
+## 云端构建结果（2026-09-07）
+
+- 合并提交：43c01173d3776a03053f670e7deb8d398221f295。
+- 构建修复提交：bda6a3289239389b8884a2172ee8a3157f071e19。首次 CI 发现 --yes 仍询问版本号；修复为无参数时直接读取 pubspec.yaml，静态分析通过。
+- 成功运行：https://github.com/Caun1112/fluxdo/actions/runs/34091118943
+- Artifact：https://github.com/Caun1112/fluxdo/actions/runs/34091118943/artifacts/10007531360
+- IPA 大小：54,895,109 字节；Runner.app 构建输出约 124.3 MB，未下载该中间产物。
+- Xcode 编译耗时 667.5 秒；整个构建另包含 Rust 原生库编译、依赖准备与测试。
+- Runner Bundle ID：com.github.lingyan000.fluxdo；最低 iOS 14.0；arm64，iphoneos 18.5。
+- DOH 原生入口符号检查通过。
+- 远程 main 与原开发分支保持原样；更新发布在 codex/merge-upstream-v0.2.28-20260907。
+- 本地最终 IPA：/Users/caun/Downloads/fluxdo-v0.2.28-bda6a328/fluxdo-0.2.28-nosign.ipa；下载后 CRC、版本号、平台和主程序验证通过。
+- IPA SHA256：dce83b1b7640136b6c51e25564e17a53bec592d526f25ab826468eec2c519713。
