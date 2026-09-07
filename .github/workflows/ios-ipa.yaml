@@ -1,0 +1,61 @@
+name: iOS 未签名 IPA
+
+on:
+  workflow_dispatch:
+  # fork 默认分支尚无此工作流，首次推送合并分支时启动构建。
+  push:
+    branches: [codex/merge-upstream-v0.2.28-20260907]
+    paths: [.github/workflows/ios-ipa.yaml]
+
+permissions:
+  contents: read
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: 检查构建环境
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          pod --version
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.3'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - name: 生成依赖与翻译
+        run: dart tool/project_prep.dart test
+      - name: 回归测试 fork 定制与重叠功能
+        run: >-
+          flutter test
+          test/providers/read_boost_provider_test.dart
+          test/providers/pinned_categories_provider_test.dart
+          test/providers/preferences_provider_test.dart
+          test/widgets/share/share_image_preview_test.dart
+          test/widgets/topic/category_drawer_test.dart
+          test/widgets/topic/topic_detail_overlay_test.dart
+          test/widgets/topic/topics_floating_actions_test.dart
+          test/pages/topic_detail_page
+          test/plugins
+          test/services/download_service_test.dart
+      - name: 构建并打包 TrollStore 目标 IPA
+        run: dart tool/build_ipa_nosign.dart --yes
+      - name: 验证 IPA 与原生库
+        run: |
+          python3 scripts/ci/validate_ipa.py build/ios/ipa/*.ipa
+          nm -gU build/ios/iphoneos/Runner.app/Runner > "$RUNNER_TEMP/runner-symbols.txt"
+          grep '_doh_proxy_start_with_config_json' "$RUNNER_TEMP/runner-symbols.txt"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fluxdo-ios-unsigned
+          path: build/ios/ipa/*.ipa
+          if-no-files-found: error
+          retention-days: 7
