@@ -1,4 +1,4 @@
-name: iOS 未签名 IPA
+name: iOS 未签名 IPA 与 Rootless DEB
 
 on:
   workflow_dispatch:
@@ -9,6 +9,7 @@ on:
       - .github/workflows/ios-ipa.yaml
       - tool/build_ipa_nosign.dart
       - scripts/ci/validate_ipa.py
+      - scripts/ci/build_rootless_deb.py
 
 permissions:
   contents: read
@@ -39,6 +40,8 @@ jobs:
       - name: 回归测试 fork 定制与重叠功能
         run: >-
           flutter test
+          test/widgets/layout/floating_bottom_nav_test.dart
+          test/widgets/layout/adaptive_scaffold_test.dart
           test/providers/read_boost_provider_test.dart
           test/providers/pinned_categories_provider_test.dart
           test/providers/preferences_provider_test.dart
@@ -56,9 +59,15 @@ jobs:
           python3 scripts/ci/validate_ipa.py build/ios/ipa/*.ipa
           nm -gU build/ios/iphoneos/Runner.app/Runner > "$RUNNER_TEMP/runner-symbols.txt"
           grep '_doh_proxy_start_with_config_json' "$RUNNER_TEMP/runner-symbols.txt"
+      - name: 打包 Sileo Rootless DEB
+        run: |
+          brew install ldid dpkg
+          python3 scripts/ci/build_rootless_deb.py build/ios/iphoneos/Runner.app build/ios/deb
       - uses: actions/upload-artifact@v7
         with:
           name: fluxdo-ios-unsigned
-          path: build/ios/ipa/*.ipa
+          path: |
+            build/ios/ipa/*.ipa
+            build/ios/deb/*.deb
           if-no-files-found: error
           retention-days: 7

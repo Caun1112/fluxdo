@@ -423,65 +423,25 @@ class _AdaptiveBottomNavigationState
 /// 收在一处而非散落于各组件：这些值互相咬合（槽宽由 item 高派生、胶囊高
 /// 由 item 高 + 内边距派生、圆角由胶囊高派生），分散定义时改一个必漏其余。
 ///
-/// 取值来源：
-/// - 基准 [itemHeightLabeled] = 48，比 Telegram 双端的 56 紧凑。实测参考
-///   设计（1200px 截图，dpr 2.75）量得选中 pill 高 98px ≈ 36dp、图标与
-///   标签压在其中上下几乎不留白 —— 悬浮形态的关键是「压实」。
-///   48 = 上 4 + 图标 24 + 间距 1 + 标签行高 ~13 + 下 4。
-/// - 外边距/内边距对齐 Telegram（iOS `TabBarComponent` innerInset 4、
-///   sideInset 12；Android `MainTabsActivity` inset ≈4、距导航栏 8）。
+/// 在原紧凑规格上放大两倍；窄屏宽度单独限幅，为右手操作保留左侧空隙。
 abstract final class _CapsuleMetrics {
-  /// 带字态 item 基准高
-  static const double itemHeightLabeled = 48;
-
-  /// 无字态 item 高（图标 24 + 上下各 8，收成接近正圆的选中 pill）
-  static const double itemHeightLabelless = 40;
-
-  /// 图标尺寸（与既有 Rail / NavigationBar 同轴）
-  static const double iconSize = 24;
-
-  /// 图标区距 item 顶部的偏移
-  static const double iconTop = 4;
-
-  /// 图标底边到标签顶边的间距。参考设计与 TG 两端都近乎贴合
-  /// （TG iOS ~3 / Android ~0.33），「压实的一坨」是这套视觉语言的关键，
-  /// 不能按 M3 的舒展间距给。
-  static const double iconGap = 1;
-
-  /// 标签距 item 底部的留白
-  static const double labelBottom = 4;
-
-  /// 标签字号。TG iOS 10 semibold / Android 12 medium，取 11
-  /// 兼顾中文标签可读性与紧凑高度。
-  static const double labelSize = 11;
-
-  /// 标签行高倍数
+  static const double itemHeightLabeled = 96;
+  static const double itemHeightLabelless = 80;
+  static const double iconSize = 48;
+  static const double iconTop = 8;
+  static const double iconGap = 2;
+  static const double labelBottom = 8;
+  static const double labelSize = 22;
   static const double labelHeight = 1.2;
-
-  /// 胶囊内容四周留白（TG iOS innerInset 4 / Android inset ≈4）
-  static const double innerInset = 4;
-
-  /// 槽宽 / item 高的比例。槽宽由高派生而非独立常量：选中 pill 铺满整个
-  /// 槽位，一旦两者脱钩，改高就会让 pill 的胖瘦比例漂移。
-  ///
-  /// 1.6 取自实测参考设计（pill 213×98 物理像素 ≈ 77×36dp，比例 2.14）
-  /// 与 M3 槽位（72×80，比例 0.9）之间：前者标签在 pill 外故可以很扁，
-  /// 本实现 pill 含标签，取 1.6 让胶囊不至于过宽。
+  static const double innerInset = 8;
   static const double slotAspect = 1.6;
+  static const double minSlotWidth = 112;
 
-  /// 槽宽下限：中文两字标签（字号 11）约 22 宽，加左右各 6 呼吸位。
-  /// 无字态按比例算出的槽宽会偏窄，这里兜底。
-  static const double minSlotWidth = 56;
-
-  /// 胶囊距屏幕左右边缘的最小外边距（TG iOS sideInset 12）
+  /// 右侧保留安全边距，左侧至少留出 12% 可用宽度。
   static const double outerMargin = 12;
-
-  /// 胶囊距屏幕底缘的外边距（TG 双端一致 8）
+  static const double leftSpaceFraction = 0.12;
   static const double bottomMargin = 8;
-
-  /// 胶囊最大宽度。宽屏（平板竖屏 / 折叠展开）不拉满，
-  /// 取 TG iOS 500 与 Android 344 的中间档。
-  static const double maxWidth = 420;
+  static const double maxWidth = 840;
 
   /// 单个条目的高度。
   ///
@@ -559,7 +519,7 @@ class _ActiveDestinationIcon extends ConsumerWidget {
 /// - 槽宽 = item 高 × [_CapsuleMetrics.slotAspect]：与高绑定，
 ///   改高时选中 pill 的胖瘦比例不漂移
 /// - 左右/底部外边距见 [_CapsuleMetrics.outerMargin] / `bottomMargin`
-/// - 最大宽 [_CapsuleMetrics.maxWidth]：宽屏不铺满，居中悬浮
+/// - 最大宽 [_CapsuleMetrics.maxWidth]：窄屏限幅，靠右悬浮
 /// - 描边 0.4，上浅下深（模拟玻璃边缘的受光差）
 /// - 阴影极柔：blur 24 / 黑 6%，offset (0,2)。TG 的影子几乎不可见
 ///   （iOS 黑 4%），重影会让胶囊显得「贴纸」而非「悬浮」
@@ -626,9 +586,16 @@ class _FloatingBottomBarShell extends StatelessWidget {
       top: false,
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final maxWidth = math.min(
-            constraints.maxWidth - _CapsuleMetrics.outerMargin * 2,
-            _CapsuleMetrics.maxWidth,
+          final leftSpace = math.max(
+            _CapsuleMetrics.outerMargin,
+            constraints.maxWidth * _CapsuleMetrics.leftSpaceFraction,
+          );
+          final maxWidth = math.max(
+            0.0,
+            math.min(
+              constraints.maxWidth - leftSpace - _CapsuleMetrics.outerMargin,
+              _CapsuleMetrics.maxWidth,
+            ),
           );
           // 槽宽随 item 高等比缩放：改高时 pill 的胖瘦比例保持不变
           final slotWidth = _CapsuleMetrics.slotWidth(itemHeight);
@@ -637,12 +604,15 @@ class _FloatingBottomBarShell extends StatelessWidget {
             maxWidth,
           );
           return Padding(
-            padding: const EdgeInsets.only(bottom: _CapsuleMetrics.bottomMargin),
+            padding: const EdgeInsets.only(
+              right: _CapsuleMetrics.outerMargin,
+              bottom: _CapsuleMetrics.bottomMargin,
+            ),
             child: Align(
               // 槽位约束是 looseConstraints.tighten(width)：maxHeight 几乎
               // 是整个页面高，Expand 类组件（Center）会把胶囊顶到屏幕中间。
               // heightFactor 收缩到子组件高度，多余空间一律贴底。
-              alignment: Alignment.bottomCenter,
+              alignment: Alignment.bottomRight,
               heightFactor: 1.0,
               child: SizedBox(
                 width: width,
@@ -723,14 +693,8 @@ class _CapsuleBorderPainter extends CustomPainter {
         Offset(inner.center.dx, inner.top),
         Offset(inner.center.dx, inner.bottom),
         isDark
-            ? [
-                const Color(0x0AFFFFFF),
-                const Color(0x14FFFFFF),
-              ]
-            : [
-                const Color(0x11000000),
-                const Color(0x20000000),
-              ],
+            ? [const Color(0x0AFFFFFF), const Color(0x14FFFFFF)]
+            : [const Color(0x11000000), const Color(0x20000000)],
       );
     canvas.drawRRect(rrect, paint);
   }
@@ -933,7 +897,9 @@ class _CapsuleNavItem extends StatelessWidget {
           onTap: onTap,
           child: labelless
               // 无字态：图标在条目内居中
-              ? Center(child: icon)
+              ? Center(
+                  child: FittedBox(fit: BoxFit.scaleDown, child: icon),
+                )
               : Padding(
                   padding: const EdgeInsets.only(
                     top: _CapsuleMetrics.iconTop,
@@ -941,7 +907,10 @@ class _CapsuleNavItem extends StatelessWidget {
                   ),
                   child: Column(
                     children: [
-                      SizedBox(height: _CapsuleMetrics.iconSize, child: icon),
+                      SizedBox(
+                        height: _CapsuleMetrics.iconSize,
+                        child: FittedBox(fit: BoxFit.scaleDown, child: icon),
+                      ),
                       const SizedBox(height: _CapsuleMetrics.iconGap),
                       // 标签占满剩余高度并在其中居中：字体放大时
                       // _CapsuleMetrics.itemHeight 已同步上浮，这里不会溢出

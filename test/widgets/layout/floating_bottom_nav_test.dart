@@ -7,9 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// 悬浮胶囊底栏的几何与选中态回归。
 ///
-/// 几何：item 高 48（无字 40）+ 内边距 4×2，距屏底 8、距左右 12。
-/// 比 Telegram 的 56 紧凑 —— 参考设计实测 pill 高 ≈36dp，
-/// 悬浮形态的关键是「压实」。
+/// 几何：原尺寸放大两倍，距屏底 8、靠右留边 12，左侧保留空隙。
 void main() {
   const screen = Size(390, 844);
   const safeBottom = 34.0;
@@ -20,8 +18,10 @@ void main() {
     double textScale = 1.0,
     int count = 5,
     int selectedIndex = 0,
+    Size viewport = screen,
+    ValueChanged<int>? onSelected,
   }) async {
-    tester.view.physicalSize = screen;
+    tester.view.physicalSize = viewport;
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
 
@@ -38,7 +38,7 @@ void main() {
         child: MaterialApp(
           home: MediaQuery(
             data: MediaQueryData(
-              size: screen,
+              size: viewport,
               padding: const EdgeInsets.only(bottom: safeBottom),
               textScaler: TextScaler.linear(textScale),
             ),
@@ -46,7 +46,7 @@ void main() {
               extendBody: true,
               bottomNavigationBar: AdaptiveBottomNavigation(
                 selectedIndex: selectedIndex,
-                onDestinationSelected: (_) {},
+                onDestinationSelected: onSelected ?? (_) {},
                 destinations: [
                   for (var i = 0; i < count; i++)
                     AdaptiveDestination(
@@ -69,12 +69,14 @@ void main() {
   RenderBox capsuleOf(WidgetTester tester) =>
       tester.renderObject<RenderBox>(find.byType(ClipRRect).first);
 
-  testWidgets('带字态胶囊高 56，贴屏底 8 / 距左右 12', (tester) async {
+  testWidgets('带字态胶囊高 112，贴屏底 8 / 靠右留边 12', (tester) async {
     await pumpBar(tester, labelless: false);
     final box = capsuleOf(tester);
-    expect(box.size.height, 56, reason: 'item 48 + inset 4×2');
+    expect(box.size.height, 112, reason: 'item 96 + inset 8×2');
     final topLeft = box.localToGlobal(Offset.zero);
-    expect(topLeft.dx, 12, reason: '左外边距（TG iOS sideInset）');
+    expect(topLeft.dx, closeTo(screen.width * 0.12, 0.01));
+    expect(screen.width - topLeft.dx - box.size.width, closeTo(12, 0.01));
+    expect(topLeft.dx + box.size.width / 2, greaterThan(screen.width / 2));
     expect(
       screen.height - (topLeft.dy + box.size.height),
       safeBottom + 8,
@@ -82,16 +84,16 @@ void main() {
     );
   });
 
-  testWidgets('无字态胶囊收到 48 高', (tester) async {
+  testWidgets('无字态胶囊放大至 96 高', (tester) async {
     await pumpBar(tester, labelless: true);
-    expect(capsuleOf(tester).size.height, 48, reason: 'item 40 + inset 4×2');
+    expect(capsuleOf(tester).size.height, 96, reason: 'item 80 + inset 8×2');
   });
 
   testWidgets('大字号下带字态高度上浮，不裁标签', (tester) async {
     await pumpBar(tester, labelless: false, textScale: 2.0);
     expect(
       capsuleOf(tester).size.height,
-      greaterThan(56),
+      greaterThan(112),
       reason: '标签行高超出基准时补偿高度',
     );
     expect(tester.takeException(), isNull);
@@ -99,10 +101,10 @@ void main() {
 
   testWidgets('无字态高度不随字号变化', (tester) async {
     await pumpBar(tester, labelless: true, textScale: 2.0);
-    expect(capsuleOf(tester).size.height, 48);
+    expect(capsuleOf(tester).size.height, 96);
   });
 
-  testWidgets('宽屏不铺满：胶囊宽度受上限约束并居中', (tester) async {
+  testWidgets('宽屏不铺满：胶囊宽度受上限约束并靠右', (tester) async {
     tester.view.physicalSize = const Size(1200, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -143,11 +145,7 @@ void main() {
     final box = capsuleOf(tester);
     expect(box.size.width, lessThan(1200), reason: '宽屏不拉满');
     final left = box.localToGlobal(Offset.zero).dx;
-    expect(
-      left,
-      closeTo((1200 - box.size.width) / 2, 0.5),
-      reason: '水平居中悬浮',
-    );
+    expect(left, closeTo(1200 - box.size.width - 12, 0.5), reason: '靠右悬浮');
   });
 
   testWidgets('选中 pill 铺满整个条目槽位（非 M3 的只包图标短胶囊）', (tester) async {
@@ -157,8 +155,8 @@ void main() {
     final capsule = capsuleOf(tester);
     // pill 是 StadiumBorder 的 DecoratedBox；条目的墨水层也用 StadiumBorder，
     // 这里按尺寸筛出 pill（宽 = 槽宽、高 = item 高）
-    final itemHeight = capsule.size.height - 4 * 2;
-    final slot = (capsule.size.width - 4 * 2) / count;
+    final itemHeight = capsule.size.height - 8 * 2;
+    final slot = (capsule.size.width - 8 * 2) / count;
 
     final pill = find.byWidgetPredicate((w) {
       if (w is! DecoratedBox) return false;
@@ -184,7 +182,7 @@ void main() {
     });
 
     // 入口数少到不触发宽度压缩（5 项在 390 宽下会被 maxWidth 压窄）
-    await pumpBar(tester, labelless: false, count: 3);
+    await pumpBar(tester, labelless: false, count: 1);
     final labeled = tester.renderObject<RenderBox>(pill.first).size;
     expect(
       labeled.width / labeled.height,
@@ -192,19 +190,38 @@ void main() {
       reason: '带字态槽宽 = item 高 × 1.6',
     );
 
-    await pumpBar(tester, labelless: true, count: 3);
+    await pumpBar(tester, labelless: true, count: 1);
     final bare = tester.renderObject<RenderBox>(pill.first).size;
     expect(
       bare.width / bare.height,
       closeTo(1.6, 0.02),
       reason: '无字态同比例 —— 槽宽不是硬编码常量，随高一起收',
     );
-    expect(
-      bare.width,
-      lessThan(labeled.width),
-      reason: '无字态更矮，槽宽也应更窄',
-    );
+    expect(bare.width, lessThan(labeled.width), reason: '无字态更矮，槽宽也应更窄');
   });
+
+  for (final labelless in [false, true]) {
+    testWidgets('320 窄屏无溢出且所有按钮可点击（无字：$labelless）', (tester) async {
+      final selected = <int>[];
+      await pumpBar(
+        tester,
+        labelless: labelless,
+        viewport: const Size(320, 568),
+        selectedIndex: -1,
+        onSelected: selected.add,
+      );
+      final box = capsuleOf(tester);
+      final origin = box.localToGlobal(Offset.zero);
+      expect(origin.dx, greaterThan(12));
+      expect(origin.dx + box.size.width, closeTo(308, 0.01));
+      for (var i = 0; i < 5; i++) {
+        await tester.tap(find.byTooltip('标签$i'));
+        await tester.pumpAndSettle();
+      }
+      expect(selected, [0, 1, 2, 3, 4]);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('切换选中项时 pill 滑动到新槽位', (tester) async {
     await pumpBar(tester, labelless: false, selectedIndex: 0);
