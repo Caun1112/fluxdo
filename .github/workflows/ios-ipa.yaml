@@ -12,6 +12,7 @@ on:
       - scripts/ci/build_rootless_deb.py
       - scripts/ci/ios_permissions.py
       - scripts/ci/test_ios_permissions.py
+      - scripts/ci/test_ios_entitlements.py
 
 permissions:
   contents: read
@@ -57,7 +58,7 @@ jobs:
       - name: 权限归一化与归档回归测试
         run: |
           brew install ldid dpkg
-          python3 -m unittest discover -s scripts/ci -p 'test_ios_permissions.py' -v
+          python3 -m unittest discover -s scripts/ci -p 'test_ios_*.py' -v
       - name: 构建并打包 TrollStore 目标 IPA
         run: dart tool/build_ipa_nosign.dart --yes
       - name: 验证 IPA 与原生库

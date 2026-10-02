@@ -12,6 +12,22 @@ import tempfile
 from ios_permissions import normalize_permissions, validate_deb
 
 
+def app_entitlements(bundle_id):
+    # Rootless 不依赖开发者团队前缀；只授权本应用的钥匙串组，不共享其他应用数据。
+    return {
+        "application-identifier": bundle_id,
+        "keychain-access-groups": [bundle_id],
+        "com.apple.developer.web-browser": True,
+        "com.apple.private.security.container-required": True,
+    }
+
+
+def verify_entitlements(executable, bundle_id):
+    actual = plistlib.loads(subprocess.check_output(["ldid", "-e", str(executable)]))
+    if actual != app_entitlements(bundle_id):
+        raise ValueError(f"应用签名权限与预期不一致: {executable}")
+
+
 def build_deb(app: Path, output: Path) -> Path:
     with (app / "Info.plist").open("rb") as stream:
         info = plistlib.load(stream)
@@ -35,12 +51,9 @@ def build_deb(app: Path, output: Path) -> Path:
             subprocess.run(["ldid", "-S", str(binary)], check=True)
         entitlements = Path(temporary) / "entitlements.plist"
         with entitlements.open("wb") as stream:
-            plistlib.dump({
-                "application-identifier": info["CFBundleIdentifier"],
-                "com.apple.developer.web-browser": True,
-                "com.apple.private.security.container-required": True,
-            }, stream)
+            plistlib.dump(app_entitlements(info["CFBundleIdentifier"]), stream)
         subprocess.run(["ldid", f"-S{entitlements}", str(executable)], check=True)
+        verify_entitlements(executable, info["CFBundleIdentifier"])
         metadata = root / "DEBIAN"
         metadata.mkdir()
         (metadata / "control").write_text(
@@ -72,6 +85,13 @@ def build_deb(app: Path, output: Path) -> Path:
         )
         subprocess.run(["dpkg-deb", "--info", str(deb)], check=True)
         validate_deb(deb)
+        # 最终产物再解包检查，避免只验证签名前的配置文件。
+        unpacked = Path(temporary) / "verify"
+        subprocess.run(["dpkg-deb", "-x", str(deb), str(unpacked)], check=True)
+        verify_entitlements(
+            unpacked / "var/jb/Applications/Fluxdo.app" / info["CFBundleExecutable"],
+            info["CFBundleIdentifier"],
+        )
     return deb
 
 
