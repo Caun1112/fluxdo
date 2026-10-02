@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import tempfile
 
+from ios_permissions import normalize_permissions, validate_deb
+
 
 def build_deb(app: Path, output: Path) -> Path:
     with (app / "Info.plist").open("rb") as stream:
@@ -52,7 +54,7 @@ def build_deb(app: Path, output: Path) -> Path:
         )
         # 不清理应用数据。升级仅重新注册图标，卸载时仅注销应用。
         for name, action, command in (
-            ("postinst", "configure", "/var/jb/usr/bin/uicache -p /var/jb/Applications/Fluxdo.app"),
+            ("postinst", "configure", "chmod -R a+rX /var/jb/Applications/Fluxdo.app\n    /var/jb/usr/bin/uicache -p /var/jb/Applications/Fluxdo.app"),
             ("prerm", "remove|deconfigure", "/var/jb/usr/bin/uicache -u /var/jb/Applications/Fluxdo.app"),
         ):
             script = metadata / name
@@ -61,13 +63,15 @@ def build_deb(app: Path, output: Path) -> Path:
                 encoding="utf-8",
             )
             script.chmod(0o755)
+        # 签名工具可能重建文件；在所有写入之后统一整个 staging（包括父目录）。
+        normalize_permissions(root)
         environment = dict(os.environ, COPYFILE_DISABLE="1")
         subprocess.run(
             ["dpkg-deb", "--root-owner-group", "-Zgzip", "--build", str(root), str(deb)],
             check=True, env=environment,
         )
         subprocess.run(["dpkg-deb", "--info", str(deb)], check=True)
-        subprocess.run(["dpkg-deb", "--contents", str(deb)], check=True, stdout=subprocess.DEVNULL)
+        validate_deb(deb)
     return deb
 
 

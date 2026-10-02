@@ -6,6 +6,23 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import stat
+
+from ios_permissions import MACHO_MAGIC, validate_mode
+
+
+def validate_archive_permissions(archive):
+    for entry in archive.infolist():
+        mode = entry.external_attr >> 16
+        if stat.S_ISLNK(mode):
+            continue
+        executable = False
+        if not entry.is_dir():
+            with archive.open(entry) as stream:
+                executable = stream.read(4) in MACHO_MAGIC
+        validate_mode(entry.filename, mode & 0o7777,
+                      directory=entry.is_dir(), executable=executable)
+
 
 
 def validate(path):
@@ -15,6 +32,7 @@ def validate(path):
     with zipfile.ZipFile(ipa) as archive:
         if archive.testzip() is not None:
             raise ValueError("IPA 校验失败")
+        validate_archive_permissions(archive)
         names = set(archive.namelist())
         root = "Payload/Runner.app/"
         info = plistlib.loads(archive.read(root + "Info.plist"))

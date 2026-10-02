@@ -73,6 +73,11 @@ Future<void> main(List<String> args) async {
     final packagedRunner = Directory(p.join(payloadDir.path, 'Runner.app'));
     await _copyDirectory(runnerApp, packagedRunner);
     await _normalizeNativeAssetFrameworks(packagedRunner);
+    await runOrExit(
+      title: '归一化 IPA 目录、资源与执行文件权限',
+      executable: 'python3',
+      arguments: ['scripts/ci/ios_permissions.py', payloadDir.path],
+    );
 
     final ipaFile = File(ipaPath);
     if (ipaFile.existsSync()) {
