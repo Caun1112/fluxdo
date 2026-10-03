@@ -423,25 +423,25 @@ class _AdaptiveBottomNavigationState
 /// 收在一处而非散落于各组件：这些值互相咬合（槽宽由 item 高派生、胶囊高
 /// 由 item 高 + 内边距派生、圆角由胶囊高派生），分散定义时改一个必漏其余。
 ///
-/// 在原紧凑规格上放大两倍；窄屏宽度单独限幅，为右手操作保留左侧空隙。
+/// 默认胶囊高与首页悬浮按钮同为 56，单个入口宽 56；靠右位置保持不变。
 abstract final class _CapsuleMetrics {
-  static const double itemHeightLabeled = 96;
-  static const double itemHeightLabelless = 80;
-  static const double iconSize = 48;
-  static const double iconTop = 8;
+  static const double itemHeightLabeled = 48;
+  static const double itemHeightLabelless = 48;
+  static const double iconSize = 24;
+  static const double iconTop = 4;
   static const double iconGap = 2;
-  static const double labelBottom = 8;
-  static const double labelSize = 22;
+  static const double labelBottom = 4;
+  static const double labelSize = 11;
   static const double labelHeight = 1.2;
-  static const double innerInset = 8;
-  static const double slotAspect = 1.6;
-  static const double minSlotWidth = 112;
+  static const double innerInset = 4;
+  static const double slotAspect = 7 / 6;
+  static const double minSlotWidth = 56;
 
   /// 右侧保留安全边距，左侧至少留出 12% 可用宽度。
   static const double outerMargin = 12;
   static const double leftSpaceFraction = 0.12;
   static const double bottomMargin = 8;
-  static const double maxWidth = 840;
+  static const double maxWidth = 420;
 
   /// 单个条目的高度。
   ///
